@@ -1,0 +1,8 @@
+.madharness-mini/
+.venv/
+.env
+.cache/
+__pycache__/
+*.py[cod]
+
+.DS_Store

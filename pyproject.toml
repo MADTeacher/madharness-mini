@@ -1,0 +1,13 @@
+[project]
+name = "madharness-mini"
+version = "0.1.0"
+description = "Minimal dependency-free coding agent harness for the madharness course."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+madharness-mini = "madharness_mini.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
