@@ -16,7 +16,6 @@ def main(argv: list[str] | None = None) -> None:
         p = sub.add_parser(name)
         p.add_argument("task")
     p = sub.add_parser("init")
-    p.add_argument("--provider")
     p.add_argument("--model")
     p.add_argument("--base-url")
     p.add_argument("--api-key")
@@ -33,7 +32,6 @@ def main(argv: list[str] | None = None) -> None:
                     value = getpass.getpass("Ключ API (можно оставить пустым): ")
                     api_key = value or None
             path, changes = cfg.initialize(
-                provider=args.provider,
                 model=args.model,
                 base_url=args.base_url,
                 api_key=api_key,
@@ -45,7 +43,6 @@ def main(argv: list[str] | None = None) -> None:
                     "base_url": "base_url",
                     "created": "config.json",
                     "model": "model",
-                    "provider": "provider",
                 }
                 changed = [names.get(item, item) for item in sorted(set(changes))]
                 print("Обновлено: " + ", ".join(changed))

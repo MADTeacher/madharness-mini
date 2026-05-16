@@ -8,15 +8,9 @@ STATE_DIR = ".madharness-mini"
 MAX_OUTPUT = 12000
 
 DEFAULT_CONFIG = {
-    "provider": "openrouter",
     "model": "deepseek/deepseek-v4-flash",
-    "base_url": "",
+    "base_url": "https://openrouter.ai/api/v1",
     "api_key": "",
-    "providers": {
-        "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key": ""},
-        "kodikrouter": {"base_url": "https://kodikrouter.ru/api/v1", "api_key": ""},
-        "local": {"base_url": "http://127.0.0.1:11434/v1", "api_key": ""},
-    },
     "temperature": 0.2,
     "max_turns": 8,
     "workspace_root": ".",

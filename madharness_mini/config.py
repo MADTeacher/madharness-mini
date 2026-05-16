@@ -12,7 +12,10 @@ class Config:
         self.data = dict(DEFAULT_CONFIG)
         path = self.state_dir / "config.json"
         if path.exists():
-            self.data.update(json.loads(path.read_text(encoding="utf-8")))
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.data.update(stored)
+            self.data.pop("provider", None)
+            self.data.pop("providers", None)
         self.apply_env()
         self.root = (self.cwd / self.data["workspace_root"]).resolve()
 
@@ -25,7 +28,6 @@ class Config:
     def initialize(
         self,
         *,
-        provider: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -35,7 +37,6 @@ class Config:
         changes: list[str] = []
         data = dict(self.data)
         updates = {
-            "provider": provider,
             "model": model,
             "base_url": base_url,
             "api_key": api_key,
@@ -57,14 +58,8 @@ class Config:
         env.update(
             {k: v for k, v in os.environ.items() if k.startswith("MADHARNESS_MINI_")}
         )
-        fields = {
-            "MADHARNESS_MINI_ROUTER": "provider",
-            "MADHARNESS_MINI_MODEL": "model",
-            "MADHARNESS_MINI_PROVIDER_MODEL": "model",
-            "MADHARNESS_MINI_BASE_URL": "base_url",
-            "MADHARNESS_MINI_API_KEY": "api_key",
-        }
-        for key, field in fields.items():
+        for field in ("model", "base_url", "api_key"):
+            key = f"MADHARNESS_MINI_{field.upper()}"
             if env.get(key):
                 self.data[field] = env[key]
 

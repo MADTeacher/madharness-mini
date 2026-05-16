@@ -1,68 +1,64 @@
 # madharness-mini
 
-`madharness-mini` - минималестичный харнесс для учебного проекта. Реализован на Python 3.13+ и не добавляет runtime-зависимостей сверх стандартной библиотеки.
+`madharness-mini` - это учебнай харнесс для работы с ИИ-агентом над разрабатываемым приложением. Проект написан на Python 3.13+, без использования дополнительных пакетов.
 
-## Установка через uv
+## Быстрый запуск
 
-Из корня проекта харнесс можно установить как системную команду через `uv tool install`:
-
-```bash
-uv tool install --python 3.13 .
-```
-
-После установки команда `madharness-mini` будет доступна из любой папки, если каталог инструментов `uv` добавлен в `PATH`.
-
-Проверка:
+Установите `madharness-mini` из GitHub:
 
 ```bash
-madharness-mini ask "Return a short greeting"
+uv tool install madharness-mini --from git+https://github.com/MADTeacher/madharness-mini.git
 ```
 
-Если команда не находится, выполните:
+Откройте папку проекта, с которой должен работать агент, и создайте настройку:
+
+```bash
+madharness-mini init \
+  --model deepseek/deepseek-v4-flash \
+  --api-key "ключ-доступа-openrouter"
+```
+
+Задайте простой вопрос:
+
+```bash
+madharness-mini ask "Объясни, что делает этот проект"
+```
+
+Запустите агентский режим для задачи по проекту:
+
+```bash
+madharness-mini run "Найди команду для запуска тестов и объясни, что она проверяет"
+```
+
+Если терминал не находит команду `madharness-mini`, выполните:
 
 ```bash
 uv tool update-shell
 ```
 
-Затем перезапустите терминал.
+Потом закройте терминал и откройте его заново.
 
-Если нужно установить харнесс из другой папки, передайте абсолютный путь к проекту:
+## Дополнительная документация
 
-```bash
-uv tool install --python 3.13 /Users/madteacher/Documents/GitHub/mini-madharness
-```
+- [Возможности харнесса](docs/capabilities.md): режимы, инструменты агента, настройки, `AGENTS.md`, ограничения безопасности.
 
-После изменений в коде переустановите команду:
+## Разработка самого проекта
 
-```bash
-uv tool install --python 3.13 --reinstall .
-```
-
-## Локальный запуск
-
-Для разработки используйте `uv run`:
+Если вы меняете код `madharness-mini`, запускайте команду из корня этого репозитория через `uv run`, предварительно настроив .env:
 
 ```bash
-uv run madharness-mini ask "Return a short greeting"
+uv run madharness-mini ask "Объясни, что делает этот проект"
 ```
 
-## Инициализация проекта
-
-В новом проекте сначала создайте локальную настройку харнесса:
+Переустановить харнесс из локального проекта можно с помощью команды:
 
 ```bash
-uv run madharness-mini init --api-key "ваш-ключ-api"
+uv tool install --python 3.13 --force .
 ```
 
-Команда создаст `.madharness-mini/config.json` и каталог для трасс. Если ключ уже задан через переменную `MADHARNESS_MINI_API_KEY`, можно запустить:
+## Проверка
 
-```bash
-uv run madharness-mini init
-```
-
-После этого `ask` и `run` будут брать настройки из `config.json`.
-
-Тесты:
+Основная команда тестов:
 
 ```bash
 uv run -m unittest discover -s tests

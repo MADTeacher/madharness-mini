@@ -10,27 +10,27 @@ class ModelClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    def provider(self) -> tuple[str, dict[str, Any]]:
-        name = self.cfg.data.get("provider", "openrouter")
-        providers = self.cfg.data.get("providers") or {}
-        data = dict(providers.get(name) or {})
-        if self.cfg.data.get("base_url"):
-            data["base_url"] = self.cfg.data["base_url"]
-        data.setdefault("base_url", "https://openrouter.ai/api/v1")
-        if self.cfg.data.get("api_key"):
-            data["api_key"] = self.cfg.data["api_key"]
-        data.setdefault("api_key", "")
-        data.setdefault("headers", {})
-        return name, data
+    def settings(self) -> dict[str, Any]:
+        headers = self.cfg.data.get("headers") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        data = {
+            "base_url": self.cfg.data.get("base_url")
+            or "https://openrouter.ai/api/v1",
+            "api_key": self.cfg.data.get("api_key") or "",
+            "headers": dict(headers),
+            "model": self.cfg.data.get("model"),
+        }
+        return data
 
     def chat(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
-        provider, settings = self.provider()
+        settings = self.settings()
         key = settings.get("api_key", "")
         if not key:
             raise RuntimeError(
-                f"нет ключа API для {provider}: запустите "
+                "нет ключа API для LLM API: запустите "
                 "madharness-mini init --api-key ... или задайте MADHARNESS_MINI_API_KEY"
             )
         payload: dict[str, Any] = {
@@ -55,4 +55,4 @@ class ModelClient:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"{provider} HTTP {exc.code}: {body}") from exc
+            raise RuntimeError(f"LLM API HTTP {exc.code}: {body}") from exc

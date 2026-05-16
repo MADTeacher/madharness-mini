@@ -32,44 +32,66 @@ class CoreTests(unittest.TestCase):
 
     def test_config_defaults_merge_with_file(self):
         cfg = self.make_cfg()
-        self.assertEqual(
-            cfg.data["providers"]["openrouter"]["base_url"],
-            "https://openrouter.ai/api/v1",
-        )
+        self.assertEqual(cfg.data["base_url"], "https://openrouter.ai/api/v1")
+        self.assertNotIn("provider", cfg.data)
+        self.assertNotIn("providers", cfg.data)
         self.assertTrue(cfg.data["allow_shell"])
 
-    def test_model_client_selects_configured_provider(self):
+    def test_model_client_reads_top_level_base_url(self):
         cfg = self.make_cfg()
-        cfg.data["provider"] = "kodikrouter"
-        name, settings = ModelClient(cfg).provider()
-        self.assertEqual(name, "kodikrouter")
+        cfg.data["base_url"] = "https://kodikrouter.ru/api/v1"
+        settings = ModelClient(cfg).settings()
         self.assertEqual(settings["base_url"], "https://kodikrouter.ru/api/v1")
 
-    def test_model_client_supports_legacy_provider_config(self):
+    def test_model_client_reads_top_level_api_key(self):
         cfg = self.make_cfg()
-        cfg.data.pop("providers")
         cfg.data["base_url"] = "http://localhost:9999/v1"
         cfg.data["api_key"] = "token"
-        name, settings = ModelClient(cfg).provider()
-        self.assertEqual(name, "openrouter")
+        settings = ModelClient(cfg).settings()
         self.assertEqual(settings["base_url"], "http://localhost:9999/v1")
+        self.assertEqual(settings["api_key"], "token")
+
+    def test_config_ignores_legacy_provider_fields(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text(
+            json.dumps(
+                {
+                    "provider": "kodikrouter",
+                    "providers": {
+                        "kodikrouter": {
+                            "base_url": "https://llm.example.test/api/v1",
+                            "api_key": "",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        cfg = Config(root)
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(cfg.data["base_url"], "https://openrouter.ai/api/v1")
+        self.assertNotIn("provider", cfg.data)
+        self.assertNotIn("providers", cfg.data)
 
     def test_env_file_overrides_config(self):
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name)
         (root / ".madharness-mini").mkdir()
         (root / ".madharness-mini" / "config.json").write_text(
-            json.dumps({"provider": "openrouter", "model": "old"}), encoding="utf-8"
+            json.dumps({"model": "old", "base_url": "https://old.example/v1"}),
+            encoding="utf-8",
         )
         (root / ".env").write_text(
-            "MADHARNESS_MINI_ROUTER=kodikrouter\nMADHARNESS_MINI_MODEL=deepseek/deepseek-v4-flash\nMADHARNESS_MINI_API_KEY=secret\n",
+            "MADHARNESS_MINI_BASE_URL=https://new.example/v1\nMADHARNESS_MINI_MODEL=deepseek/deepseek-v4-flash\nMADHARNESS_MINI_API_KEY=secret\n",
             encoding="utf-8",
         )
         cfg = Config(root)
         self.addCleanup(tmp.cleanup)
-        self.assertEqual(cfg.data["provider"], "kodikrouter")
+        self.assertEqual(cfg.data["base_url"], "https://new.example/v1")
         self.assertEqual(cfg.data["model"], "deepseek/deepseek-v4-flash")
-        self.assertEqual(ModelClient(cfg).provider()[1]["api_key"], "secret")
+        self.assertEqual(ModelClient(cfg).settings()["api_key"], "secret")
 
     def test_init_command_creates_config_with_api_key(self):
         tmp = tempfile.TemporaryDirectory()
@@ -84,8 +106,8 @@ class CoreTests(unittest.TestCase):
             main(
                 [
                     "init",
-                    "--provider",
-                    "kodikrouter",
+                    "--base-url",
+                    "https://kodikrouter.ru/api/v1",
                     "--model",
                     "deepseek/deepseek-v4-flash",
                     "--api-key",
@@ -96,7 +118,9 @@ class CoreTests(unittest.TestCase):
 
         path = root / ".madharness-mini" / "config.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(data["provider"], "kodikrouter")
+        self.assertNotIn("provider", data)
+        self.assertNotIn("providers", data)
+        self.assertEqual(data["base_url"], "https://kodikrouter.ru/api/v1")
         self.assertEqual(data["model"], "deepseek/deepseek-v4-flash")
         self.assertEqual(data["api_key"], "secret")
         self.assertIn("Настройка записана", out.getvalue())
