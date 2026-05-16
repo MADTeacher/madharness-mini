@@ -14,9 +14,12 @@ uv tool install madharness-mini --from git+https://github.com/MADTeacher/madharn
 
 ```bash
 madharness-mini init \
+  --base-url https://openrouter.ai/api/v1 \
   --model deepseek/deepseek-v4-flash \
   --api-key "ключ-доступа-openrouter"
 ```
+
+Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths`, `allow_shell` и `verify_command`. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
 
 Задайте простой вопрос:
 
