@@ -3,7 +3,7 @@ from __future__ import annotations
 from importlib import resources
 from pathlib import Path
 
-from .utils import clipped
+AGENTS_MD_MAX_BYTES = 32 * 1024
 
 
 def load_prompt(name: str) -> str:
@@ -11,7 +11,18 @@ def load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8").rstrip()
 
 
-def load_agents_md(root: Path, cwd: Path) -> str:
+def clipped_bytes(text: str, limit: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    prefix = raw[:limit].decode("utf-8", errors="ignore")
+    clipped = len(raw) - len(prefix.encode("utf-8"))
+    return prefix + f"\n...[clipped {clipped} bytes]"
+
+
+def load_agents_md(
+    root: Path, cwd: Path, max_bytes: int = AGENTS_MD_MAX_BYTES
+) -> str:
     files: list[Path] = []
     home = Path.home() / ".madharness-mini" / "AGENTS.md"
     if home.exists():
@@ -31,6 +42,6 @@ def load_agents_md(root: Path, cwd: Path) -> str:
             files.append(path)
     chunks = []
     for path in files:
-        text = clipped(path.read_text(encoding="utf-8"), 6000)
+        text = path.read_text(encoding="utf-8")
         chunks.append(f"# Instructions from {path}\n{text}")
-    return "\n\n".join(chunks)
+    return clipped_bytes("\n\n".join(chunks), max_bytes)

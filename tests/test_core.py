@@ -212,6 +212,26 @@ class CoreTests(unittest.TestCase):
         text = load_agents_md(cfg.root, nested)
         self.assertLess(text.index("root rules"), text.index("pkg rules"))
 
+    def test_load_agents_md_applies_one_combined_limit(self):
+        cfg = self.make_cfg()
+        nested = cfg.root / "pkg" / "sub"
+        nested.mkdir(parents=True)
+        root_text = "root rules " + ("x" * 100) + " root tail"
+        (cfg.root / "AGENTS.md").write_text(root_text, encoding="utf-8")
+        (cfg.root / "pkg" / "AGENTS.md").write_text("pkg rules", encoding="utf-8")
+        root_chunk = f"# Instructions from {cfg.root / 'AGENTS.md'}\n{root_text}"
+
+        with patch(
+            "madharness_mini.instructions.Path.home", return_value=cfg.root / "home"
+        ):
+            text = load_agents_md(
+                cfg.root, nested, max_bytes=len(root_chunk.encode("utf-8")) + 5
+            )
+
+        self.assertIn("root tail", text)
+        self.assertNotIn("pkg rules", text)
+        self.assertIn("...[clipped", text)
+
     def test_base_messages_loads_system_prompt_from_markdown(self):
         cfg = self.make_cfg()
         messages = base_messages(cfg, "Return a short greeting")
