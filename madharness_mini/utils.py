@@ -18,7 +18,6 @@ DEFAULT_CONFIG = {
     "workspace_root": ".",
     "protected_paths": [".git", ".env", "secrets", "~/.ssh"],
     "allow_shell": True,
-    "verify_command": "uv run -m unittest discover -s tests",
 }
 
 

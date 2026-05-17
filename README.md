@@ -19,7 +19,7 @@ madharness-mini init \
   --api-key "ключ-доступа-openrouter"
 ```
 
-Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths`, `allow_shell` и `verify_command`. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
+Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths` и `allow_shell`. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
 
 Задайте простой вопрос:
 
