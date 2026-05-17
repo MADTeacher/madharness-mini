@@ -1,3 +1,5 @@
+"""Главный цикл общения с моделью в режимах `ask` и `run`."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +14,8 @@ from .utils import fail, parse_tool_args
 
 
 def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
+    """Собрать системное и пользовательское сообщение для нового запуска."""
+
     instructions = load_agents_md(cfg.root, cfg.cwd)
     system = load_prompt("system")
     if instructions:
@@ -20,6 +24,8 @@ def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
 
 
 def ask(task: str, cfg: Config) -> tuple[str, Any]:
+    """Задать модели один вопрос без инструментов и записать трассу."""
+
     trace = Trace(cfg, "ask")
     messages = base_messages(cfg, task)
     trace.write("model_call_started", tools_count=0)
@@ -36,6 +42,13 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
 
 
 def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
+    """Запустить агентский цикл с инструментами до ответа или лимита ходов.
+
+    На каждом ходе модель либо возвращает финальный текст, либо просит вызвать
+    один или несколько tools. Харнесс выполняет вызовы локально, добавляет
+    JSON-наблюдения в историю и отправляет обновлённый контекст обратно модели.
+    """
+
     trace = Trace(cfg, "run")
     client = ModelClient(cfg)
     registry = ToolRegistry(cfg)

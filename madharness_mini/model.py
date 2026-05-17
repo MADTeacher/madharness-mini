@@ -1,3 +1,5 @@
+"""Минимальный клиент OpenAI-совместимого Chat Completions API."""
+
 import json
 import urllib.error
 import urllib.request
@@ -7,10 +9,18 @@ from .config import Config
 
 
 class ModelClient:
+    """Отправляет сообщения модели и возвращает сырой JSON-ответ API."""
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
     def settings(self) -> dict[str, Any]:
+        """Собрать настройки подключения из `Config`.
+
+        Метод нормализует необязательные HTTP-заголовки и подставляет базовый
+        URL по умолчанию, чтобы `chat` оставался узким транспортным методом.
+        """
+
         headers = self.cfg.data.get("headers") or {}
         if not isinstance(headers, dict):
             headers = {}
@@ -26,6 +36,13 @@ class ModelClient:
     def chat(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
+        """Вызвать `/chat/completions` с сообщениями и необязательными tools.
+
+        Если ключ API не задан, метод поднимает `RuntimeError` с подсказкой для
+        пользователя. При HTTP-ошибке тело ответа сохраняется в тексте ошибки,
+        чтобы проблему было видно в CLI и трассе.
+        """
+
         settings = self.settings()
         key = settings.get("api_key", "")
         if not key:

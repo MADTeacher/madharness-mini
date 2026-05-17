@@ -1,3 +1,5 @@
+"""Инструменты, которые агент может вызывать во время `run`."""
+
 import fnmatch
 import shlex
 import subprocess
@@ -11,12 +13,16 @@ from .utils import clipped, fail, ignored, intp, obj, ok, strp
 
 @dataclass
 class ToolSpec:
+    """Описание одного инструмента и функции, которая его выполняет."""
+
     name: str
     description: str
     parameters: dict[str, Any]
     handler: Callable[[dict[str, Any]], dict[str, Any]]
 
     def schema(self) -> dict[str, Any]:
+        """Преобразовать описание инструмента в формат Chat Completions tools."""
+
         function = {
             "name": self.name,
             "description": self.description,
@@ -26,6 +32,13 @@ class ToolSpec:
 
 
 class ToolRegistry:
+    """Реестр доступных инструментов агента.
+
+    Методы класса реализуют операции над локальным workspace. Каждый инструмент
+    возвращает словарь-наблюдение в едином формате, чтобы модель могла понять
+    результат следующего шага без знания внутренних Python-исключений.
+    """
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.policy = Policy(cfg)
@@ -75,9 +88,13 @@ class ToolRegistry:
         }
 
     def schemas(self) -> list[dict[str, Any]]:
+        """Вернуть JSON-схемы всех инструментов для запроса к модели."""
+
         return [tool.schema() for tool in self.tools.values()]
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Вызвать инструмент по имени и превратить исключения в `fail`-ответ."""
+
         tool = self.tools.get(name)
         if not tool:
             return fail(name, "unknown tool")
@@ -87,6 +104,8 @@ class ToolRegistry:
             return fail(name, f"{type(exc).__name__}: {exc}")
 
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Перечислить файлы workspace с простым glob-фильтром по имени."""
+
         base, err = self.policy.safe_path(args.get("path", "."))
         if err:
             return fail("list_files", err)
@@ -110,6 +129,8 @@ class ToolRegistry:
         )
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Прочитать фрагмент UTF-8 файла с номерами строк."""
+
         path, err = self.policy.safe_path(args["path"])
         if err:
             return fail("read_file", err)
@@ -128,6 +149,8 @@ class ToolRegistry:
         )
 
     def write_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Записать UTF-8 файл внутри workspace, создав родительские папки."""
+
         path, err = self.policy.safe_path(args["path"])
         if err or not path:
             return fail("write_file", err or f"invalid path: {args['path']}")
@@ -139,6 +162,8 @@ class ToolRegistry:
         )
 
     def search_code(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Найти точное вхождение текста в файлах workspace."""
+
         query = args["query"]
         pattern = args.get("glob", "*")
         matches = []
@@ -173,6 +198,8 @@ class ToolRegistry:
         )
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Проверить и применить unified diff через `git apply`."""
+
         patch = args["patch"]
         for cmd in (["git", "apply", "--check"], ["git", "apply"]):
             proc = subprocess.run(
@@ -193,6 +220,8 @@ class ToolRegistry:
         return ok("apply_patch", "patch applied")
 
     def run_shell(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Запустить разрешённую простую команду в рабочей папке."""
+
         command = args["command"]
         allowed, reason = self.policy.shell_allowed(command)
         if not allowed:

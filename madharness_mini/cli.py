@@ -1,3 +1,5 @@
+"""Командная строка `madharness-mini`."""
+
 from __future__ import annotations
 
 import argparse
@@ -7,9 +9,32 @@ import sys
 from .config import Config
 from .loop import ask, run_agent
 from .trace import summarize_trace
+from .utils import DEFAULT_CONFIG, STATE_DIR
+
+
+def api_key_prompt(cfg: Config) -> str:
+    """Собрать подсказку для интерактивного ввода API-ключа."""
+
+    base_url = cfg.data.get("base_url") or DEFAULT_CONFIG["base_url"]
+    model = cfg.data.get("model") or DEFAULT_CONFIG["model"]
+    router = (
+        "OpenRouter"
+        if base_url == DEFAULT_CONFIG["base_url"]
+        else "выбранного маршрутизатора/API"
+    )
+    return (
+        f"Ключ API для {router}.\n"
+        f"Маршрутизатор/API: {base_url}\n"
+        f"Модель по умолчанию: {model}\n"
+        f"Enter - оставить пустым; позже можно переопределить model, base_url "
+        f"и api_key в {STATE_DIR}/config.json.\n"
+        "Ключ API: "
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Разобрать аргументы CLI и выполнить выбранную команду."""
+
     parser = argparse.ArgumentParser(prog="madharness-mini")
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name in ("ask", "run"):
@@ -29,7 +54,7 @@ def main(argv: list[str] | None = None) -> None:
             api_key = args.api_key
             if api_key is None and not cfg.data.get("api_key") and not args.no_prompt:
                 if sys.stdin.isatty():
-                    value = getpass.getpass("Ключ API (можно оставить пустым): ")
+                    value = getpass.getpass(api_key_prompt(cfg))
                     api_key = value or None
             path, changes = cfg.initialize(
                 model=args.model,

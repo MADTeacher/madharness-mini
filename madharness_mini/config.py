@@ -1,3 +1,5 @@
+"""Загрузка, создание и переопределение настроек харнесса."""
+
 import json
 import os
 from pathlib import Path
@@ -6,6 +8,14 @@ from .utils import DEFAULT_CONFIG, STATE_DIR
 
 
 class Config:
+    """Настройки одного запуска `madharness-mini`.
+
+    Объект собирает значения из настроек по умолчанию, локального
+    `.madharness-mini/config.json`, файла `.env` и переменных окружения.
+    После инициализации `root` указывает на рабочую папку, внутри которой
+    инструменты агента могут читать и менять файлы.
+    """
+
     def __init__(self, cwd: Path | None = None):
         self.cwd = (cwd or Path.cwd()).resolve()
         self.state_dir = self.cwd / STATE_DIR
@@ -20,6 +30,8 @@ class Config:
         self.root = (self.cwd / self.data["workspace_root"]).resolve()
 
     def ensure_dirs(self) -> None:
+        """Создать служебные папки и конфиг, если их ещё нет."""
+
         (self.state_dir / "traces").mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
         if not cfg.exists():
@@ -32,6 +44,8 @@ class Config:
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> tuple[Path, list[str]]:
+        """Записать начальный `config.json` и вернуть список изменённых полей."""
+
         self.state_dir.mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
         changes: list[str] = []
@@ -54,6 +68,8 @@ class Config:
         return cfg, changes
 
     def apply_env(self) -> None:
+        """Переопределить выбранные настройки из `.env` и окружения процесса."""
+
         env = read_env_file(self.cwd / ".env")
         env.update(
             {k: v for k, v in os.environ.items() if k.startswith("MADHARNESS_MINI_")}
@@ -65,6 +81,12 @@ class Config:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
+    """Прочитать простой `.env` с парами `KEY=value`.
+
+    Парсер намеренно минимальный: он нужен только для локальных настроек
+    учебного проекта и не реализует весь синтаксис shell-переменных.
+    """
+
     if not path.exists():
         return {}
     data = {}

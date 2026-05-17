@@ -1,3 +1,5 @@
+"""JSONL-трассы запусков `ask` и `run`."""
+
 import json
 import time
 import uuid
@@ -8,6 +10,8 @@ from .config import Config
 
 
 class Trace:
+    """Пишет события одного запуска в файл `.madharness-mini/traces`."""
+
     def __init__(self, cfg: Config, kind: str):
         cfg.ensure_dirs()
         self.id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
@@ -15,12 +19,16 @@ class Trace:
         self.write("session_start", kind=kind)
 
     def write(self, event: str, **data: Any) -> None:
+        """Добавить одну JSON-запись события в конец трассы."""
+
         record = {"ts": time.time(), "event": event, **data}
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def summarize_trace(cfg: Config, trace_id: str) -> str:
+    """Вернуть короткую человекочитаемую сводку по трассе."""
+
     matches = list((cfg.state_dir / "traces").glob(f"{trace_id}*.jsonl"))
     if not matches:
         raise SystemExit(f"trace not found: {trace_id}")

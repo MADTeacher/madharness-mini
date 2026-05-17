@@ -143,6 +143,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(data["api_key"], "")
         self.assertIn("Ключ API не задан", out.getvalue())
 
+    def test_init_command_prompts_with_default_router_model_and_config(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        old_cwd = os.getcwd()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(os.chdir, old_cwd)
+        os.chdir(root)
+        out = StringIO()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("madharness_mini.cli.sys.stdin.isatty", return_value=True),
+            patch("madharness_mini.cli.getpass.getpass", return_value="secret") as prompt,
+            redirect_stdout(out),
+        ):
+            main(["init"])
+
+        prompt_text = prompt.call_args.args[0]
+        self.assertIn("OpenRouter", prompt_text)
+        self.assertIn("deepseek/deepseek-v4-flash", prompt_text)
+        self.assertIn(".madharness-mini/config.json", prompt_text)
+
+        data = json.loads(
+            (root / ".madharness-mini" / "config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(data["api_key"], "secret")
+
     def test_model_client_mentions_init_when_api_key_missing(self):
         with patch.dict(os.environ, {}, clear=True):
             cfg = self.make_cfg()

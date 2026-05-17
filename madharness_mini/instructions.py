@@ -1,3 +1,5 @@
+"""Загрузка системного промпта и инструкций `AGENTS.md`."""
+
 from __future__ import annotations
 
 from importlib import resources
@@ -7,11 +9,15 @@ AGENTS_MD_MAX_BYTES = 32 * 1024
 
 
 def load_prompt(name: str) -> str:
+    """Прочитать встроенный markdown-промпт из пакета."""
+
     path = resources.files("madharness_mini").joinpath("prompts", f"{name}.md")
     return path.read_text(encoding="utf-8").rstrip()
 
 
 def clipped_bytes(text: str, limit: int) -> str:
+    """Обрезать строку так, чтобы она укладывалась в лимит UTF-8 байт."""
+
     raw = text.encode("utf-8")
     if len(raw) <= limit:
         return text
@@ -23,6 +29,13 @@ def clipped_bytes(text: str, limit: int) -> str:
 def load_agents_md(
     root: Path, cwd: Path, max_bytes: int = AGENTS_MD_MAX_BYTES
 ) -> str:
+    """Собрать применимые инструкции `AGENTS.md` от общих к более локальным.
+
+    Сначала учитывается глобальный файл пользователя, затем инструкции из корня
+    workspace и вложенных папок по пути к текущей директории. Итоговый текст
+    ограничивается общим бюджетом байт, чтобы системное сообщение не раздувалось.
+    """
+
     files: list[Path] = []
     home = Path.home() / ".madharness-mini" / "AGENTS.md"
     if home.exists():

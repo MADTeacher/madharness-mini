@@ -1,3 +1,5 @@
+"""Проверки безопасности для путей и shell-команд агента."""
+
 import shlex
 from pathlib import Path
 
@@ -5,12 +7,20 @@ from .config import Config
 
 
 class Policy:
+    """Ограничивает инструменты рамками рабочей папки и безопасных команд."""
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.root = cfg.root
         self.protected = list(cfg.data["protected_paths"])
 
     def safe_path(self, raw: str) -> tuple[Path | None, str | None]:
+        """Преобразовать пользовательский путь в абсолютный путь внутри workspace.
+
+        Возвращает пару `(path, None)` при успехе или `(None, reason)`, если путь
+        пустой, выходит за `workspace_root` или попадает в защищённую область.
+        """
+
         if not raw:
             return None, "empty path"
         path = (self.root / raw).resolve()
@@ -33,6 +43,8 @@ class Policy:
         return path, None
 
     def shell_allowed(self, command: str) -> tuple[bool, str]:
+        """Проверить, можно ли запускать shell-команду через инструмент агента."""
+
         if not self.cfg.data.get("allow_shell", True):
             return False, "shell disabled by config"
         lowered = command.lower()
