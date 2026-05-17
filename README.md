@@ -62,7 +62,7 @@ uv tool install --python 3.13 --force .
 
 ## Проверка
 
-Основная команда тестов:
+Для запуска тестов введите следующую команду:
 
 ```bash
 uv run -m unittest discover -s tests
