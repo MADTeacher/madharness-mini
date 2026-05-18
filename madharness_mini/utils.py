@@ -7,14 +7,14 @@ from pathlib import Path
 from typing import Any
 
 STATE_DIR = ".madharness-mini"
-MAX_OUTPUT = 12000
+MAX_OUTPUT = 20000
 
 DEFAULT_CONFIG = {
     "model": "deepseek/deepseek-v4-flash",
     "base_url": "https://openrouter.ai/api/v1",
     "api_key": "",
     "temperature": 0.2,
-    "max_turns": 8,
+    "max_turns": 50,
     "workspace_root": ".",
     "protected_paths": [".git", ".env", "secrets", "~/.ssh"],
     "allow_shell": True,
