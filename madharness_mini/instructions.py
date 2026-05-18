@@ -1,4 +1,4 @@
-"""Загрузка системного промпта и инструкций `AGENTS.md`."""
+"""Сбор системного промпта и проектных инструкций."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ AGENTS_MD_MAX_BYTES = 32 * 1024
 
 
 def load_prompt(name: str) -> str:
-    """Прочитать встроенный markdown-промпт из пакета."""
+    """Загрузить встроенный markdown-промпт из ресурсов пакета."""
 
     path = resources.files("madharness_mini").joinpath("prompts", f"{name}.md")
     return path.read_text(encoding="utf-8").rstrip()
 
 
 def clipped_bytes(text: str, limit: int) -> str:
-    """Обрезать строку так, чтобы она укладывалась в лимит UTF-8 байт."""
+    """Ограничить текст указанным числом байт в кодировке UTF-8."""
 
     raw = text.encode("utf-8")
     if len(raw) <= limit:
@@ -29,11 +29,11 @@ def clipped_bytes(text: str, limit: int) -> str:
 def load_agents_md(
     root: Path, cwd: Path, max_bytes: int = AGENTS_MD_MAX_BYTES
 ) -> str:
-    """Собрать применимые инструкции `AGENTS.md` от общих к более локальным.
+    """Собрать применимые `AGENTS.md` от общих правил к локальным.
 
     Сначала учитывается глобальный файл пользователя, затем инструкции из корня
-    workspace и вложенных папок по пути к текущей директории. Итоговый текст
-    ограничивается общим бюджетом байт, чтобы системное сообщение не раздувалось.
+    workspace и вложенных папок по пути к текущей директории. Общий текст
+    обрезается по байтовому лимиту перед добавлением в системное сообщение.
     """
 
     files: list[Path] = []

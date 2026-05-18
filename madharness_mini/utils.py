@@ -1,4 +1,4 @@
-"""Общие маленькие помощники для инструментов, схем и ответов."""
+"""Общие константы и функции для схем, наблюдений и ограничений вывода."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
 
 
 def clipped(text: str, limit: int = MAX_OUTPUT) -> str:
-    """Обрезать длинный текстовый результат инструмента до безопасного размера."""
+    """Ограничить текстовый результат инструмента максимальной длиной."""
 
     if len(text) <= limit:
         return text
@@ -30,26 +30,26 @@ def clipped(text: str, limit: int = MAX_OUTPUT) -> str:
 
 
 def ok(tool: str, summary: str, **data: Any) -> dict[str, Any]:
-    """Сформировать успешное наблюдение инструмента для модели."""
+    """Сформировать успешное JSON-наблюдение инструмента."""
 
     return {"ok": True, "tool": tool, "summary": summary, **data}
 
 
 def fail(tool: str, summary: str, **data: Any) -> dict[str, Any]:
-    """Сформировать ошибочное наблюдение инструмента для модели."""
+    """Сформировать JSON-наблюдение об ошибке инструмента."""
 
     return {"ok": False, "tool": tool, "summary": summary, **data}
 
 
 def ignored(path: Path) -> bool:
-    """Проверить, надо ли скрыть путь от поиска и листинга файлов."""
+    """Определить, нужно ли исключить путь из поиска и листинга."""
 
     ignored_names = {".git", STATE_DIR, "__pycache__", ".venv", ".uv-cache"}
     return any(part in ignored_names for part in path.parts)
 
 
 def parse_tool_args(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Достать имя инструмента и JSON-аргументы из tool call модели."""
+    """Извлечь имя инструмента и аргументы из `tool_call` модели."""
 
     fn = call.get("function", {})
     raw = fn.get("arguments") or "{}"
@@ -58,7 +58,7 @@ def parse_tool_args(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 def obj(props: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
-    """Создать JSON Schema для объекта аргументов инструмента."""
+    """Создать JSON Schema объекта для аргументов инструмента."""
 
     return {
         "type": "object",
@@ -71,7 +71,7 @@ def obj(props: dict[str, Any], required: list[str] | None = None) -> dict[str, A
 def strp(
     default: str | None = None, desc: str = "", req: bool = False
 ) -> dict[str, Any]:
-    """Создать JSON Schema для строкового параметра инструмента."""
+    """Создать JSON Schema строкового параметра инструмента."""
 
     data: dict[str, Any] = {"type": "string", "description": desc}
     if default is not None and not req:
@@ -80,6 +80,6 @@ def strp(
 
 
 def intp(default: int) -> dict[str, Any]:
-    """Создать JSON Schema для целочисленного параметра с default."""
+    """Создать JSON Schema целочисленного параметра со значением по умолчанию."""
 
     return {"type": "integer", "default": default}

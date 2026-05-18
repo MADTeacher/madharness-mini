@@ -1,4 +1,4 @@
-"""Загрузка, создание и переопределение настроек харнесса."""
+"""Работа с локальной конфигурацией `madharness-mini`."""
 
 import json
 import os
@@ -8,12 +8,11 @@ from .utils import DEFAULT_CONFIG, STATE_DIR
 
 
 class Config:
-    """Настройки одного запуска `madharness-mini`.
+    """Конфигурация, с которой выполняется одна команда `madharness-mini`.
 
-    Объект собирает значения из настроек по умолчанию, локального
-    `.madharness-mini/config.json`, файла `.env` и переменных окружения.
-    После инициализации `root` указывает на рабочую папку, внутри которой
-    инструменты агента могут читать и менять файлы.
+    Значения берутся из настроек по умолчанию, локального `config.json`,
+    файла `.env` и переменных окружения. Поле `root` задаёт границу файловых
+    операций агента.
     """
 
     def __init__(self, cwd: Path | None = None):
@@ -30,7 +29,7 @@ class Config:
         self.root = (self.cwd / self.data["workspace_root"]).resolve()
 
     def ensure_dirs(self) -> None:
-        """Создать служебные папки и конфиг, если их ещё нет."""
+        """Подготовить каталог состояния и файл конфигурации по умолчанию."""
 
         (self.state_dir / "traces").mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
@@ -44,7 +43,7 @@ class Config:
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> tuple[Path, list[str]]:
-        """Записать начальный `config.json` и вернуть список изменённых полей."""
+        """Создать или обновить `config.json` и перечислить изменённые поля."""
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
@@ -68,7 +67,7 @@ class Config:
         return cfg, changes
 
     def apply_env(self) -> None:
-        """Переопределить выбранные настройки из `.env` и окружения процесса."""
+        """Применить поддерживаемые переменные из `.env` и окружения процесса."""
 
         env = read_env_file(self.cwd / ".env")
         env.update(
@@ -81,10 +80,10 @@ class Config:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
-    """Прочитать простой `.env` с парами `KEY=value`.
+    """Прочитать минимальный `.env`-файл с парами `KEY=value`.
 
-    Парсер намеренно минимальный: он нужен только для локальных настроек
-    учебного проекта и не реализует весь синтаксис shell-переменных.
+    Парсер поддерживает только настройки проекта и не повторяет синтаксис
+    командной оболочки полностью.
     """
 
     if not path.exists():

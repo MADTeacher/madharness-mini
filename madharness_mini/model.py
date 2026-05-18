@@ -1,4 +1,4 @@
-"""Минимальный клиент OpenAI-совместимого Chat Completions API."""
+"""Клиент для OpenAI-совместимого Chat Completions API."""
 
 import json
 import urllib.error
@@ -9,16 +9,16 @@ from .config import Config
 
 
 class ModelClient:
-    """Отправляет сообщения модели и возвращает сырой JSON-ответ API."""
+    """Отправляет запросы модели и возвращает ответ API без преобразований."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
     def settings(self) -> dict[str, Any]:
-        """Собрать настройки подключения из `Config`.
+        """Получить параметры подключения из `Config`.
 
-        Метод нормализует необязательные HTTP-заголовки и подставляет базовый
-        URL по умолчанию, чтобы `chat` оставался узким транспортным методом.
+        Метод приводит дополнительные HTTP-заголовки к словарю и подставляет
+        базовый URL по умолчанию, чтобы `chat` отвечал только за HTTP-запрос.
         """
 
         headers = self.cfg.data.get("headers") or {}
@@ -36,11 +36,11 @@ class ModelClient:
     def chat(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
-        """Вызвать `/chat/completions` с сообщениями и необязательными tools.
+        """Вызвать `/chat/completions` с сообщениями и схемами инструментов.
 
-        Если ключ API не задан, метод поднимает `RuntimeError` с подсказкой для
-        пользователя. При HTTP-ошибке тело ответа сохраняется в тексте ошибки,
-        чтобы проблему было видно в CLI и трассе.
+        При отсутствии ключа метод поднимает `RuntimeError` с инструкцией для
+        пользователя. При HTTP-ошибке тело ответа попадает в текст исключения,
+        чтобы причина была видна в CLI и трассе.
         """
 
         settings = self.settings()
