@@ -2,7 +2,6 @@
 
 import fnmatch
 import shlex
-import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -72,12 +71,6 @@ class ToolRegistry:
                 "Search text in workspace files.",
                 obj({"query": strp(req=True), "glob": strp("*")}, ["query"]),
                 self.search_code,
-            ),
-            "apply_patch": ToolSpec(
-                "apply_patch",
-                "Apply a unified diff patch.",
-                obj({"patch": strp(req=True)}, ["patch"]),
-                self.apply_patch,
             ),
             "run_shell": ToolSpec(
                 "run_shell",
@@ -196,28 +189,6 @@ class ToolRegistry:
             results=matches,
             truncated=False,
         )
-
-    def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Проверить и применить unified diff через `git apply`."""
-
-        patch = args["patch"]
-        for cmd in (["git", "apply", "--check"], ["git", "apply"]):
-            proc = subprocess.run(
-                cmd,
-                input=patch,
-                cwd=self.cfg.root,
-                text=True,
-                capture_output=True,
-                timeout=30,
-            )
-            if proc.returncode:
-                return fail(
-                    "apply_patch",
-                    f"{' '.join(cmd)} failed",
-                    stdout=clipped(proc.stdout),
-                    stderr=clipped(proc.stderr),
-                )
-        return ok("apply_patch", "patch applied")
 
     def run_shell(self, args: dict[str, Any]) -> dict[str, Any]:
         """Запустить разрешённую простую команду в рабочей папке."""

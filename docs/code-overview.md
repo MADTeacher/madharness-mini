@@ -8,7 +8,7 @@
 | `madharness_mini/config.py` | Собирает настройки из значений по умолчанию, `config.json`, `.env` и переменных окружения. |
 | `madharness_mini/loop.py` | Управляет режимами `ask` и `run`: готовит сообщения, вызывает модель, обрабатывает tool calls. |
 | `madharness_mini/model.py` | Отправляет HTTP-запрос в OpenAI-совместимый `/chat/completions`. |
-| `madharness_mini/tools.py` | Описывает инструменты агента и выполняет операции с файлами, поиском, патчами и shell-командами. |
+| `madharness_mini/tools.py` | Описывает инструменты агента и выполняет операции с файлами, поиском и shell-командами. |
 | `madharness_mini/policy.py` | Проверяет, что инструменты не выходят за workspace и не запускают явно рискованные команды. |
 | `madharness_mini/instructions.py` | Загружает системный промпт и применимые файлы `AGENTS.md`. |
 | `madharness_mini/trace.py` | Записывает JSONL-журнал запуска и строит короткую сводку по результатам работы сессии. |

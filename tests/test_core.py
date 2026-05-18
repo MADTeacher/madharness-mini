@@ -230,6 +230,16 @@ class CoreTests(unittest.TestCase):
         )
         self.assertFalse(obs["ok"])
 
+    def test_apply_patch_is_not_registered(self):
+        schemas = ToolRegistry(self.make_cfg()).schemas()
+        names = [item["function"]["name"] for item in schemas]
+        self.assertNotIn("apply_patch", names)
+
+    def test_apply_patch_call_returns_unknown_tool(self):
+        obs = ToolRegistry(self.make_cfg()).call("apply_patch", {"patch": ""})
+        self.assertFalse(obs["ok"])
+        self.assertIn("unknown tool", obs["summary"])
+
     def test_load_agents_md_from_root_to_nested_dir(self):
         cfg = self.make_cfg()
         nested = cfg.root / "pkg" / "sub"
