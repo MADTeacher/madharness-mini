@@ -4,6 +4,7 @@ import fnmatch
 import shlex
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
@@ -66,6 +67,26 @@ class ToolRegistry:
                     ["path", "content"],
                 ),
                 self.write_file,
+            ),
+            "replace_text": ToolSpec(
+                "replace_text",
+                "Replace exact text in a UTF-8 file inside the workspace.",
+                obj(
+                    {
+                        "path": strp(req=True),
+                        "old": strp(req=True),
+                        "new": strp(req=True),
+                        "expected_replacements": intp(1),
+                    },
+                    ["path", "old", "new"],
+                ),
+                self.replace_text,
+            ),
+            "apply_patch": ToolSpec(
+                "apply_patch",
+                "Apply a small Codex-style patch inside the workspace.",
+                obj({"patch": strp(req=True)}, ["patch"]),
+                self.apply_patch,
             ),
             "search_code": ToolSpec(
                 "search_code",
@@ -154,6 +175,187 @@ class ToolRegistry:
         return ok(
             "write_file", f"wrote {args['path']}", bytes=len(content.encode("utf-8"))
         )
+
+    def replace_text(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Точно заменить текст в UTF-8 файле без полной перезаписи моделью."""
+
+        path, err = self.policy.safe_path(args["path"])
+        if err or not path:
+            return fail("replace_text", err or f"invalid path: {args['path']}")
+        if not path.is_file():
+            return fail("replace_text", f"not a file: {args['path']}")
+        old = args["old"]
+        if old == "":
+            return fail("replace_text", "old text must not be empty")
+        expected = int(args.get("expected_replacements", 1))
+        if expected < 1:
+            return fail("replace_text", "expected_replacements must be at least 1")
+        text = path.read_text(encoding="utf-8")
+        count = text.count(old)
+        if count != expected:
+            return fail(
+                "replace_text",
+                f"expected {expected} replacements, found {count}",
+                replacements=count,
+            )
+        updated = text.replace(old, args["new"])
+        path.write_text(updated, encoding="utf-8")
+        return ok(
+            "replace_text",
+            f"replaced {count} occurrence(s) in {args['path']}",
+            replacements=count,
+        )
+
+    def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Применить небольшой Codex-style patch без внешних утилит."""
+
+        try:
+            changes = self._prepare_patch(args["patch"])
+        except ValueError as exc:
+            return fail("apply_patch", str(exc))
+        for path, content in changes.items():
+            if content is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+        return ok("apply_patch", f"applied patch to {len(changes)} file(s)")
+
+    def _prepare_patch(self, patch: str) -> dict[Path, str | None]:
+        lines = patch.splitlines()
+        if not lines or lines[0] != "*** Begin Patch":
+            raise ValueError("patch must start with *** Begin Patch")
+        if lines[-1] != "*** End Patch":
+            raise ValueError("patch must end with *** End Patch")
+
+        changes: dict[Path, str | None] = {}
+        i = 1
+        while i < len(lines) - 1:
+            line = lines[i]
+            if line.startswith("*** Add File: "):
+                i = self._parse_add_file(lines, i, changes)
+            elif line.startswith("*** Update File: "):
+                i = self._parse_update_file(lines, i, changes)
+            elif line.startswith("*** Delete File: "):
+                i = self._parse_delete_file(lines, i, changes)
+            elif line.startswith("*** Move to: "):
+                raise ValueError("Move to is only supported after Update File")
+            elif line == "*** End of File":
+                i += 1
+            else:
+                raise ValueError(f"unexpected patch line: {line}")
+        return changes
+
+    def _patch_path(self, raw: str) -> Path:
+        path, err = self.policy.safe_path(raw)
+        if err or not path:
+            raise ValueError(err or f"invalid path: {raw}")
+        return path
+
+    def _parse_add_file(
+        self, lines: list[str], i: int, changes: dict[Path, str | None]
+    ) -> int:
+        raw = lines[i].removeprefix("*** Add File: ")
+        path = self._patch_path(raw)
+        if path.exists() or path in changes:
+            raise ValueError(f"file already exists: {raw}")
+        i += 1
+        new_lines: list[str] = []
+        while i < len(lines) - 1 and not lines[i].startswith("*** "):
+            if not lines[i].startswith("+"):
+                raise ValueError("add file lines must start with +")
+            new_lines.append(lines[i][1:])
+            i += 1
+        changes[path] = "\n".join(new_lines) + ("\n" if new_lines else "")
+        return i
+
+    def _parse_delete_file(
+        self, lines: list[str], i: int, changes: dict[Path, str | None]
+    ) -> int:
+        raw = lines[i].removeprefix("*** Delete File: ")
+        path = self._patch_path(raw)
+        if path in changes:
+            raise ValueError(f"file changed more than once: {raw}")
+        if not path.is_file():
+            raise ValueError(f"not a file: {raw}")
+        changes[path] = None
+        return i + 1
+
+    def _parse_update_file(
+        self, lines: list[str], i: int, changes: dict[Path, str | None]
+    ) -> int:
+        raw = lines[i].removeprefix("*** Update File: ")
+        path = self._patch_path(raw)
+        if path in changes:
+            raise ValueError(f"file changed more than once: {raw}")
+        if not path.is_file():
+            raise ValueError(f"not a file: {raw}")
+        i += 1
+        target_path = None
+        if i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
+            target_raw = lines[i].removeprefix("*** Move to: ")
+            target_path = self._patch_path(target_raw)
+            if target_path.exists() or target_path in changes:
+                raise ValueError(f"target file already exists: {target_raw}")
+            i += 1
+
+        original = path.read_text(encoding="utf-8")
+        has_trailing_newline = original.endswith("\n")
+        current = original.splitlines()
+        saw_hunk = False
+        while i < len(lines) - 1 and not lines[i].startswith("*** "):
+            if lines[i].startswith("@@"):
+                i += 1
+            old_lines: list[str] = []
+            new_lines: list[str] = []
+            while i < len(lines) - 1 and not (
+                lines[i].startswith("@@") or lines[i].startswith("*** ")
+            ):
+                marker = lines[i][:1]
+                content = lines[i][1:]
+                if marker == " ":
+                    old_lines.append(content)
+                    new_lines.append(content)
+                elif marker == "-":
+                    old_lines.append(content)
+                elif marker == "+":
+                    new_lines.append(content)
+                else:
+                    raise ValueError(f"invalid hunk line: {lines[i]}")
+                i += 1
+            if not old_lines and not new_lines:
+                raise ValueError("empty update hunk")
+            current = self._apply_hunk(current, old_lines, new_lines)
+            saw_hunk = True
+        if not saw_hunk and target_path is None:
+            raise ValueError(f"update has no hunks: {raw}")
+        if saw_hunk:
+            updated = "\n".join(current)
+            if has_trailing_newline:
+                updated += "\n"
+        else:
+            updated = original
+        if target_path is None:
+            changes[path] = updated
+        else:
+            changes[path] = None
+            changes[target_path] = updated
+        return i
+
+    def _apply_hunk(
+        self, current: list[str], old_lines: list[str], new_lines: list[str]
+    ) -> list[str]:
+        matches = []
+        if not old_lines:
+            raise ValueError("update hunk must include context or removed lines")
+        for start in range(len(current) - len(old_lines) + 1):
+            if current[start : start + len(old_lines)] == old_lines:
+                matches.append(start)
+        if len(matches) != 1:
+            raise ValueError(f"expected 1 hunk match, found {len(matches)}")
+        start = matches[0]
+        end = start + len(old_lines)
+        return current[:start] + new_lines + current[end:]
 
     def search_code(self, args: dict[str, Any]) -> dict[str, Any]:
         """Найти строки файлов workspace, содержащие заданный текст."""
