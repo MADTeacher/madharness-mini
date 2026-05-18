@@ -1,11 +1,57 @@
 """Клиент для OpenAI-совместимого Chat Completions API."""
 
+import datetime as dt
 import json
+import math
 import urllib.error
 import urllib.request
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from .config import Config
+
+
+class ModelRateLimitError(RuntimeError):
+    """Ошибка лимита LLM API с данными для возможного повтора."""
+
+    def __init__(
+        self,
+        *,
+        status: int,
+        body: str,
+        retry_after: str | None,
+        retry_after_seconds: int | None,
+    ):
+        self.status = status
+        self.status_code = status
+        self.body = body
+        self.retry_after = retry_after
+        self.retry_after_seconds = retry_after_seconds
+        message = (
+            "достигнут лимит LLM API (HTTP 429); попробуйте позже, "
+            "смените модель/ключ или проверьте лимиты провайдера"
+        )
+        super().__init__(message)
+
+
+def parse_retry_after(value: str | None) -> int | None:
+    """Разобрать `Retry-After` в секундах или HTTP-date."""
+
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.isdecimal():
+        return int(raw)
+    try:
+        retry_at = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    return max(0, math.ceil((retry_at - now).total_seconds()))
 
 
 class ModelClient:
@@ -72,4 +118,12 @@ class ModelClient:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 429:
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                raise ModelRateLimitError(
+                    status=exc.code,
+                    body=body,
+                    retry_after=retry_after,
+                    retry_after_seconds=parse_retry_after(retry_after),
+                ) from exc
             raise RuntimeError(f"LLM API HTTP {exc.code}: {body}") from exc

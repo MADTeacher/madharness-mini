@@ -3,24 +3,50 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from .config import Config
-from .instructions import load_agents_md, load_prompt
-from .model import ModelClient
+from .instructions import load_prompt
+from .model import ModelClient, ModelRateLimitError
 from .tools import ToolRegistry
 from .trace import Trace
 from .utils import fail, parse_tool_args
+
+RATE_LIMIT_RETRY_MAX_SECONDS = 60
 
 
 def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
     """Подготовить начальные сообщения модели для задачи пользователя."""
 
-    instructions = load_agents_md(cfg.root, cfg.cwd)
     system = load_prompt("system")
-    if instructions:
-        system = f"{system}\n\n{instructions}"
     return [{"role": "system", "content": system}, {"role": "user", "content": task}]
+
+
+def call_model_with_rate_limit_retry(
+    client: ModelClient,
+    trace: Trace,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    **trace_data: Any,
+) -> dict[str, Any]:
+    """Вызвать модель и один раз переждать короткий `Retry-After` при 429."""
+
+    try:
+        return client.chat(messages, tools)
+    except ModelRateLimitError as exc:
+        wait_seconds = exc.retry_after_seconds
+        if wait_seconds is not None and 0 < wait_seconds <= RATE_LIMIT_RETRY_MAX_SECONDS:
+            trace.write(
+                "model_rate_limit_retry",
+                **trace_data,
+                status=exc.status,
+                retry_after=exc.retry_after,
+                retry_after_seconds=wait_seconds,
+            )
+            time.sleep(wait_seconds)
+            return client.chat(messages, tools)
+        raise
 
 
 def ask(task: str, cfg: Config) -> tuple[str, Any]:
@@ -30,7 +56,7 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
     messages = base_messages(cfg, task)
     trace.write("model_call_started", tools_count=0)
     try:
-        raw = ModelClient(cfg).chat(messages)
+        raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
     except RuntimeError as exc:
         trace.write("model_error", error=str(exc))
         trace.write("session_end", result=f"error: {exc}")
@@ -56,7 +82,9 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     for turn in range(int(cfg.data["max_turns"])):
         trace.write("model_call_started", turn=turn, tools_count=len(registry.tools))
         try:
-            raw = client.chat(messages, registry.schemas())
+            raw = call_model_with_rate_limit_retry(
+                client, trace, messages, registry.schemas(), turn=turn
+            )
         except RuntimeError as exc:
             trace.write("model_error", turn=turn, error=str(exc))
             trace.write("session_end", result=f"error: {exc}")

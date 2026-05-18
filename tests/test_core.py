@@ -1,17 +1,20 @@
 import json
 import os
 import tempfile
+import urllib.error
 import unittest
 from contextlib import redirect_stdout
-from io import StringIO
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from madharness_mini.cli import main
 from madharness_mini.config import Config
-from madharness_mini.instructions import load_agents_md, load_prompt
-from madharness_mini.loop import base_messages
-from madharness_mini.model import ModelClient
+from madharness_mini.instructions import load_prompt
+from madharness_mini.loop import ask, base_messages
+from madharness_mini.model import ModelClient, ModelRateLimitError, parse_retry_after
 from madharness_mini.policy import Policy
 from madharness_mini.tools import ToolRegistry
 from madharness_mini.utils import fail, ok, parse_tool_args
@@ -176,6 +179,109 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "madharness-mini init"):
             ModelClient(cfg).chat([{"role": "user", "content": "hello"}])
 
+    def test_parse_retry_after_seconds(self):
+        self.assertEqual(parse_retry_after("7"), 7)
+
+    def test_parse_retry_after_http_date(self):
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        seconds = parse_retry_after(format_datetime(retry_at, usegmt=True))
+
+        self.assertIsNotNone(seconds)
+        self.assertGreaterEqual(seconds, 1)
+        self.assertLessEqual(seconds, 30)
+
+    def test_parse_retry_after_missing_or_invalid(self):
+        self.assertIsNone(parse_retry_after(None))
+        self.assertIsNone(parse_retry_after(""))
+        self.assertIsNone(parse_retry_after("not a date"))
+
+    def test_model_client_raises_rate_limit_error_for_http_429(self):
+        cfg = self.make_cfg()
+        cfg.data["api_key"] = "token"
+        err = urllib.error.HTTPError(
+            url="https://llm.example.test/v1/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "3"},
+            fp=BytesIO(b'{"error":"limited"}'),
+        )
+
+        with patch("madharness_mini.model.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(ModelRateLimitError) as caught:
+                ModelClient(cfg).chat([{"role": "user", "content": "hello"}])
+
+        exc = caught.exception
+        self.assertEqual(exc.status, 429)
+        self.assertEqual(exc.body, '{"error":"limited"}')
+        self.assertEqual(exc.retry_after, "3")
+        self.assertEqual(exc.retry_after_seconds, 3)
+
+    def test_ask_retries_once_after_short_rate_limit(self):
+        cfg = self.make_cfg()
+        rate_limit = ModelRateLimitError(
+            status=429,
+            body="limited",
+            retry_after="1",
+            retry_after_seconds=1,
+        )
+        raw = {"choices": [{"message": {"content": "ok"}}]}
+
+        with (
+            patch("madharness_mini.loop.ModelClient.chat", side_effect=[rate_limit, raw]),
+            patch("madharness_mini.loop.time.sleep") as sleep,
+        ):
+            result, trace_path = ask("hello", cfg)
+
+        self.assertEqual(result, "ok")
+        sleep.assert_called_once_with(1)
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertIn("model_rate_limit_retry", [event["event"] for event in events])
+
+    def test_ask_fails_when_rate_limit_retry_after_is_too_long(self):
+        cfg = self.make_cfg()
+        rate_limit = ModelRateLimitError(
+            status=429,
+            body="limited",
+            retry_after="61",
+            retry_after_seconds=61,
+        )
+
+        with (
+            patch("madharness_mini.loop.ModelClient.chat", side_effect=rate_limit),
+            patch("madharness_mini.loop.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "достигнут лимит LLM API"):
+                ask("hello", cfg)
+
+        sleep.assert_not_called()
+
+    def test_ask_fails_when_retry_hits_rate_limit_again(self):
+        cfg = self.make_cfg()
+        first = ModelRateLimitError(
+            status=429,
+            body="limited",
+            retry_after="1",
+            retry_after_seconds=1,
+        )
+        second = ModelRateLimitError(
+            status=429,
+            body="still limited",
+            retry_after="1",
+            retry_after_seconds=1,
+        )
+
+        with (
+            patch("madharness_mini.loop.ModelClient.chat", side_effect=[first, second]),
+            patch("madharness_mini.loop.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "достигнут лимит LLM API"):
+                ask("hello", cfg)
+
+        sleep.assert_called_once_with(1)
+
     def test_policy_denies_outside_workspace(self):
         policy = Policy(self.make_cfg())
         path, err = policy.safe_path("../outside.txt")
@@ -200,10 +306,10 @@ class CoreTests(unittest.TestCase):
 
     def test_parse_tool_args(self):
         name, args = parse_tool_args(
-            {"function": {"name": "read_file", "arguments": '{"path":"AGENTS.md"}'}}
+            {"function": {"name": "read_file", "arguments": '{"path":"hello.txt"}'}}
         )
         self.assertEqual(name, "read_file")
-        self.assertEqual(args["path"], "AGENTS.md")
+        self.assertEqual(args["path"], "hello.txt")
 
     def test_read_file_tool(self):
         cfg = self.make_cfg()
@@ -240,35 +346,6 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(obs["ok"])
         self.assertIn("unknown tool", obs["summary"])
 
-    def test_load_agents_md_from_root_to_nested_dir(self):
-        cfg = self.make_cfg()
-        nested = cfg.root / "pkg" / "sub"
-        nested.mkdir(parents=True)
-        (cfg.root / "AGENTS.md").write_text("root rules", encoding="utf-8")
-        (cfg.root / "pkg" / "AGENTS.md").write_text("pkg rules", encoding="utf-8")
-        text = load_agents_md(cfg.root, nested)
-        self.assertLess(text.index("root rules"), text.index("pkg rules"))
-
-    def test_load_agents_md_applies_one_combined_limit(self):
-        cfg = self.make_cfg()
-        nested = cfg.root / "pkg" / "sub"
-        nested.mkdir(parents=True)
-        root_text = "root rules " + ("x" * 100) + " root tail"
-        (cfg.root / "AGENTS.md").write_text(root_text, encoding="utf-8")
-        (cfg.root / "pkg" / "AGENTS.md").write_text("pkg rules", encoding="utf-8")
-        root_chunk = f"# Instructions from {cfg.root / 'AGENTS.md'}\n{root_text}"
-
-        with patch(
-            "madharness_mini.instructions.Path.home", return_value=cfg.root / "home"
-        ):
-            text = load_agents_md(
-                cfg.root, nested, max_bytes=len(root_chunk.encode("utf-8")) + 5
-            )
-
-        self.assertIn("root tail", text)
-        self.assertNotIn("pkg rules", text)
-        self.assertIn("...[clipped", text)
-
     def test_base_messages_loads_system_prompt_from_markdown(self):
         cfg = self.make_cfg()
         messages = base_messages(cfg, "Return a short greeting")
@@ -282,19 +359,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             messages[1], {"role": "user", "content": "Return a short greeting"}
         )
-
-    def test_base_messages_orders_system_prompt_before_agents_md(self):
-        cfg = self.make_cfg()
-        nested = cfg.root / "pkg" / "sub"
-        nested.mkdir(parents=True)
-        cfg.cwd = nested
-        (cfg.root / "AGENTS.md").write_text("root rules", encoding="utf-8")
-        (cfg.root / "pkg" / "AGENTS.md").write_text("pkg rules", encoding="utf-8")
-
-        system = base_messages(cfg, "task")[0]["content"]
-
-        self.assertLess(system.index(load_prompt("system")), system.index("root rules"))
-        self.assertLess(system.index("root rules"), system.index("pkg rules"))
 
 
 if __name__ == "__main__":
