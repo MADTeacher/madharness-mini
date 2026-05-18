@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from .config import Config
-from .instructions import load_prompt
+from .instructions import load_project_instructions, load_prompt
 from .model import ModelClient, ModelRateLimitError
 from .tools import ToolRegistry
 from .trace import Trace
@@ -20,6 +20,9 @@ def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
     """Подготовить начальные сообщения модели для задачи пользователя."""
 
     system = load_prompt("system")
+    project_instructions = load_project_instructions(cfg)
+    if project_instructions:
+        system = f"{system}\n\n# Project instructions\n\n{project_instructions}"
     return [{"role": "system", "content": system}, {"role": "user", "content": task}]
 
 

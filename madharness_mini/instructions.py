@@ -1,8 +1,12 @@
-"""Сбор системного промпта."""
+"""Сбор системного промпта и проектных инструкций."""
 
 from __future__ import annotations
 
 from importlib import resources
+from pathlib import Path
+
+PROJECT_DOC_FILENAME = "AGENTS.md"
+PROJECT_DOC_MAX_BYTES = 32 * 1024
 
 
 def load_prompt(name: str) -> str:
@@ -10,3 +14,46 @@ def load_prompt(name: str) -> str:
 
     path = resources.files("madharness_mini").joinpath("prompts", f"{name}.md")
     return path.read_text(encoding="utf-8").rstrip()
+
+
+def project_instruction_dirs(root: Path, cwd: Path) -> list[Path]:
+    """Вернуть директории для поиска `AGENTS.md` от корня к активной папке."""
+
+    root = root.resolve()
+    cwd = cwd.resolve()
+    try:
+        rel = cwd.relative_to(root)
+    except ValueError:
+        return [root]
+    dirs = [root]
+    current = root
+    for part in rel.parts:
+        current = current / part
+        dirs.append(current)
+    return dirs
+
+
+def load_project_instructions(cfg: object) -> str:
+    """Собрать проектные инструкции `AGENTS.md` с лимитом Codex 32 KB."""
+
+    combined = bytearray()
+    root = Path(getattr(cfg, "root"))
+    cwd = Path(getattr(cfg, "cwd"))
+    for directory in project_instruction_dirs(root, cwd):
+        path = directory / PROJECT_DOC_FILENAME
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace").rstrip()
+        if not text.strip():
+            continue
+        data = text.encode("utf-8")
+        prefix = b"\n\n" if combined else b""
+        chunk = prefix + data
+        remaining = PROJECT_DOC_MAX_BYTES - len(combined)
+        if remaining <= 0:
+            break
+        if len(chunk) > remaining:
+            combined.extend(chunk[:remaining])
+            break
+        combined.extend(chunk)
+    return bytes(combined).decode("utf-8", errors="ignore").rstrip()
