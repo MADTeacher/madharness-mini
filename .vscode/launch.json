@@ -1,0 +1,38 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "madharness-mini: ask",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "madharness_mini",
+        "args": ["ask", "Объясни, что делает этот проект"],
+        "cwd": "${workspaceFolder}",
+        "envFile": "${workspaceFolder}/.env",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      },
+      {
+        "name": "madharness-mini: run",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "madharness_mini",
+        "args": ["run", "Найди команду для запуска тестов"],
+        "cwd": "${workspaceFolder}",
+        "envFile": "${workspaceFolder}/.env",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      },
+      {
+        "name": "tests: unittest",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "unittest",
+        "args": ["discover", "-s", "tests"],
+        "cwd": "${workspaceFolder}",
+        "envFile": "${workspaceFolder}/.env",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      }
+    ]
+  }
