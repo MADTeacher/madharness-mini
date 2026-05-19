@@ -1,7 +1,5 @@
 """Сбор системного промпта для модели."""
 
-from __future__ import annotations
-
 from importlib import resources
 
 

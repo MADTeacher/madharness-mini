@@ -1,7 +1,5 @@
 """Точка входа: команды `ask`, `run`, `init` и `trace`."""
 
-from __future__ import annotations
-
 import argparse
 import getpass
 import sys
