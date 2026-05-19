@@ -1,23 +1,32 @@
-"""Сбор системного промпта и проектных инструкций."""
+"""Системный промпт и проектные инструкции AGENTS.md для модели."""
 
 from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
 
+# Имя файла с правилами проекта в каждой папке workspace.
 PROJECT_DOC_FILENAME = "AGENTS.md"
+# Суммарный лимит байт при склейке нескольких AGENTS.md (как у Codex).
 PROJECT_DOC_MAX_BYTES = 32 * 1024
 
 
 def load_prompt(name: str) -> str:
-    """Загрузить встроенный markdown-промпт из ресурсов пакета."""
+    """Берём встроенный markdown из madharness_mini/prompts/{name}.md.
+
+    Сейчас используется как минимум `system` — базовые правила агента.
+    """
 
     path = resources.files("madharness_mini").joinpath("prompts", f"{name}.md")
     return path.read_text(encoding="utf-8").rstrip()
 
 
 def project_instruction_dirs(root: Path, cwd: Path) -> list[Path]:
-    """Вернуть директории для поиска `AGENTS.md` от корня к активной папке."""
+    """Список папок от корня workspace до текущей cwd для поиска AGENTS.md.
+
+    Сначала корень, потом каждый уровень вниз — чтобы общие правила шли
+    раньше локальных. Если cwd вне root, возвращаем только root.
+    """
 
     root = root.resolve()
     cwd = cwd.resolve()
@@ -34,7 +43,11 @@ def project_instruction_dirs(root: Path, cwd: Path) -> list[Path]:
 
 
 def load_project_instructions(cfg: object) -> str:
-    """Собрать проектные инструкции `AGENTS.md` с лимитом Codex 32 KB."""
+    """Склеиваем AGENTS.md по цепочке папок с лимитом PROJECT_DOC_MAX_BYTES.
+
+    Пустые файлы пропускаем. При переполнении обрезаем последний кусок —
+    модель всё равно получит верхнеуровневые правила проекта.
+    """
 
     combined = bytearray()
     root = Path(getattr(cfg, "root"))

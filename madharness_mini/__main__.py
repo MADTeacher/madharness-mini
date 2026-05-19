@@ -1,5 +1,3 @@
-"""Запуск CLI при вызове пакета как модуля."""
-
 from .cli import main
 
 if __name__ == "__main__":

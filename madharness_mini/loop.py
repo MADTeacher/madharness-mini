@@ -1,4 +1,4 @@
-"""Исполнение команд `ask` и `run` через модель."""
+"""Режимы ask (один ответ) и run (цикл с инструментами)."""
 
 from __future__ import annotations
 
@@ -13,11 +13,15 @@ from .tools import ToolRegistry
 from .trace import Trace
 from .utils import fail, parse_tool_args
 
+# При 429 ждём Retry-After, но не дольше этой границы (секунды).
 RATE_LIMIT_RETRY_MAX_SECONDS = 60
 
 
 def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
-    """Подготовить начальные сообщения модели для задачи пользователя."""
+    """Стартовая история чата: system + задача пользователя.
+
+    В system попадают встроенный промпт и, если есть, AGENTS.md из проекта.
+    """
 
     system = load_prompt("system")
     project_instructions = load_project_instructions(cfg)
@@ -33,7 +37,10 @@ def call_model_with_rate_limit_retry(
     tools: list[dict[str, Any]] | None = None,
     **trace_data: Any,
 ) -> dict[str, Any]:
-    """Вызвать модель и один раз переждать короткий `Retry-After` при 429."""
+    """Зовём модель; при коротком 429 один раз ждём и повторяем запрос.
+
+    Длинный Retry-After пробрасываем наверх — пользователь увидит ошибку в CLI.
+    """
 
     try:
         return client.chat(messages, tools)
@@ -53,7 +60,10 @@ def call_model_with_rate_limit_retry(
 
 
 def ask(task: str, cfg: Config) -> tuple[str, Any]:
-    """Выполнить одно обращение к модели без инструментов и записать трассу."""
+    """Один запрос к модели без инструментов; пишем трассу в JSONL.
+
+    Возвращаем текст ответа и путь к файлу трассы.
+    """
 
     trace = Trace(cfg, "ask")
     messages = base_messages(cfg, task)
@@ -71,11 +81,10 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
 
 
 def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
-    """Вести агентский цикл до финального ответа или исчерпания ходов.
+    """Агентский цикл до финального текста или исчерпания max_turns.
 
-    На каждом ходе модель либо возвращает текст, либо запрашивает один или
-    несколько `tool_calls`. Локальные результаты инструментов добавляются в
-    историю как JSON-наблюдения.
+    На каждом ходе модель либо отвечает текстом, либо шлёт tool_calls.
+    Результаты инструментов добавляем в историю как role=tool (JSON).
     """
 
     trace = Trace(cfg, "run")

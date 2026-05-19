@@ -1,4 +1,4 @@
-"""Работа с локальной конфигурацией `madharness-mini`."""
+"""Загрузка и сохранение локальной конфигурации харнесса."""
 
 import json
 import os
@@ -8,11 +8,11 @@ from .utils import DEFAULT_CONFIG, STATE_DIR
 
 
 class Config:
-    """Конфигурация, с которой выполняется одна команда `madharness-mini`.
+    """Настройки одного запуска CLI: модель, ключ, границы workspace.
 
-    Значения берутся из настроек по умолчанию, локального `config.json`,
-    файла `.env` и переменных окружения. Поле `root` задаёт границу файловых
-    операций агента.
+    Слои (позже перекрывают раньше): значения по умолчанию,
+    `.madharness-mini/config.json`, `.env`, переменные MADHARNESS_MINI_*.
+    Поле `root` — абсолютный каталог, внутри которого агент может трогать файлы.
     """
 
     def __init__(self, cwd: Path | None = None):
@@ -29,7 +29,10 @@ class Config:
         self.root = (self.cwd / self.data["workspace_root"]).resolve()
 
     def ensure_dirs(self) -> None:
-        """Подготовить каталог состояния и файл конфигурации по умолчанию."""
+        """Создаём каталог состояния и пустой config.json, если их ещё нет.
+
+        Вызывается перед записью трассы, чтобы `traces/` всегда существовал.
+        """
 
         (self.state_dir / "traces").mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
@@ -43,7 +46,11 @@ class Config:
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> tuple[Path, list[str]]:
-        """Создать или обновить `config.json` и перечислить изменённые поля."""
+        """Команда `init`: записываем config.json и возвращаем список изменений.
+
+        Переданные model/base_url/api_key попадают в файл; в списке changes —
+        имена полей, которые реально поменялись, плюс `created` для нового файла.
+        """
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
@@ -67,7 +74,10 @@ class Config:
         return cfg, changes
 
     def apply_env(self) -> None:
-        """Применить поддерживаемые переменные из `.env` и окружения процесса."""
+        """Подмешиваем в self.data значения из `.env` и окружения процесса.
+
+        Учитываются только ключи MADHARNESS_MINI_MODEL, _BASE_URL, _API_KEY.
+        """
 
         env = read_env_file(self.cwd / ".env")
         env.update(
@@ -80,10 +90,9 @@ class Config:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
-    """Прочитать минимальный `.env`-файл с парами `KEY=value`.
+    """Читаем простой `.env`: строки KEY=value, без shell-подстановок.
 
-    Парсер поддерживает только настройки проекта и не повторяет синтаксис
-    командной оболочки полностью.
+    Строки с `#` и без `=` пропускаем. Кавычки вокруг значения снимаем.
     """
 
     if not path.exists():

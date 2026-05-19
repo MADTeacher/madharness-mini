@@ -1,4 +1,4 @@
-"""Локальные инструменты агентского режима `run`."""
+"""Инструменты агента в режиме run: файлы, поиск, patch, shell."""
 
 import fnmatch
 import shlex
@@ -14,7 +14,7 @@ from .utils import clipped, fail, ignored, intp, obj, ok, strp
 
 @dataclass
 class ToolSpec:
-    """Схема инструмента и обработчик его вызова."""
+    """Один инструмент: имя, описание для модели, JSON Schema и handler."""
 
     name: str
     description: str
@@ -22,7 +22,7 @@ class ToolSpec:
     handler: Callable[[dict[str, Any]], dict[str, Any]]
 
     def schema(self) -> dict[str, Any]:
-        """Вернуть описание инструмента в формате Chat Completions."""
+        """Упаковываем инструмент в вид, который ждёт Chat Completions API."""
 
         function = {
             "name": self.name,
@@ -33,11 +33,9 @@ class ToolSpec:
 
 
 class ToolRegistry:
-    """Реестр инструментов, доступных агенту.
+    """Все инструменты run: вызов по имени, проверка через Policy.
 
-    Методы класса выполняют файловые операции, поиск и разрешённые команды
-    оболочки внутри workspace. Каждый вызов возвращает JSON-наблюдение единого
-    вида, пригодное для отправки обратно модели.
+    Каждый handler возвращает ok/fail из utils — модель видит единый JSON.
     """
 
     def __init__(self, cfg: Config):
@@ -103,12 +101,12 @@ class ToolRegistry:
         }
 
     def schemas(self) -> list[dict[str, Any]]:
-        """Вернуть схемы всех инструментов для передачи модели."""
+        """Список схем для поля tools в запросе к модели."""
 
         return [tool.schema() for tool in self.tools.values()]
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Выполнить инструмент и оформить ошибки как наблюдение `fail`."""
+        """Вызываем handler по имени; сбои ловим и отдаём fail, не падаем."""
 
         tool = self.tools.get(name)
         if not tool:
@@ -119,7 +117,7 @@ class ToolRegistry:
             return fail(name, f"{type(exc).__name__}: {exc}")
 
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Найти файлы внутри workspace по простому glob-фильтру имени."""
+        """Список файлов под path с фильтром glob по имени (до 200 штук)."""
 
         base, err = self.policy.safe_path(args.get("path", "."))
         if err:
@@ -144,7 +142,7 @@ class ToolRegistry:
         )
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Вернуть диапазон строк UTF-8 файла с номерами строк."""
+        """Читаем фрагмент UTF-8 файла: строки start..end с номерами."""
 
         path, err = self.policy.safe_path(args["path"])
         if err:
@@ -164,7 +162,7 @@ class ToolRegistry:
         )
 
     def write_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Записать UTF-8 текст в workspace, создав родительские каталоги."""
+        """Полностью перезаписываем файл в workspace; каталоги создаём сами."""
 
         path, err = self.policy.safe_path(args["path"])
         if err or not path:
@@ -177,7 +175,7 @@ class ToolRegistry:
         )
 
     def replace_text(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Точно заменить текст в UTF-8 файле без полной перезаписи моделью."""
+        """Заменяем old на new ровно expected_replacements раз в одном файле."""
 
         path, err = self.policy.safe_path(args["path"])
         if err or not path:
@@ -207,7 +205,7 @@ class ToolRegistry:
         )
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Применить небольшой Codex-style patch без внешних утилит."""
+        """Применяем текстовый patch в формате Codex (add/update/delete)."""
 
         try:
             changes = self._prepare_patch(args["patch"])
@@ -358,7 +356,7 @@ class ToolRegistry:
         return current[:start] + new_lines + current[end:]
 
     def search_code(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Найти строки файлов workspace, содержащие заданный текст."""
+        """Ищем подстроку query в файлах workspace (до 100 совпадений)."""
 
         query = args["query"]
         pattern = args.get("glob", "*")
@@ -394,7 +392,7 @@ class ToolRegistry:
         )
 
     def run_shell(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Запустить разрешённую команду оболочки в корне workspace."""
+        """Выполняем одну команду в cfg.root после проверки Policy."""
 
         command = args["command"]
         allowed, reason = self.policy.shell_allowed(command)
