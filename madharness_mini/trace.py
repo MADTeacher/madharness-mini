@@ -3,7 +3,6 @@
 import json
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 from .config import Config
@@ -15,7 +14,7 @@ class Trace:
     def __init__(self, cfg: Config, kind: str):
         cfg.ensure_dirs()
         self.id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        self.path = cfg.state_dir / "traces" / f"{self.id}.jsonl"
+        self.path = cfg.state_dir.joinpath("traces", f"{self.id}.jsonl")
         self.write("session_start", kind=kind)
 
     def write(self, event: str, **data: Any) -> None:
@@ -32,7 +31,7 @@ def summarize_trace(cfg: Config, trace_id: str) -> str:
     trace_id может быть префиксом имени файла в каталоге traces/.
     """
 
-    matches = list((cfg.state_dir / "traces").glob(f"{trace_id}*.jsonl"))
+    matches = list(cfg.state_dir.joinpath("traces").glob(f"{trace_id}*.jsonl"))
     if not matches:
         raise SystemExit(f"trace not found: {trace_id}")
     path = matches[0]
