@@ -1,4 +1,4 @@
-"""Ограничения доступа для файловых операций и команд оболочки."""
+"""Проверки безопасности путей и shell-команд перед инструментами."""
 
 import shlex
 from pathlib import Path
@@ -7,7 +7,11 @@ from .config import Config
 
 
 class Policy:
-    """Проверяет, что инструменты работают только в разрешённых границах."""
+    """Решаем, можно ли агенту трогать путь или запускать команду.
+
+    Все файловые инструменты сначала прогоняют путь через safe_path;
+    run_shell — через shell_allowed.
+    """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -15,10 +19,10 @@ class Policy:
         self.protected = list(cfg.data["protected_paths"])
 
     def safe_path(self, raw: str) -> tuple[Path | None, str | None]:
-        """Разрешить пользовательский путь относительно `workspace_root`.
+        """Проверяем относительный путь внутри workspace_root.
 
-        Возвращает абсолютный путь или причину отказа, если путь пустой,
-        выходит за рабочую папку или попадает в защищённую область.
+        Успех: (абсолютный Path, None). Отказ: (None, причина) — пустой путь,
+        выход за root, попадание в protected_paths (.git, .env и т.д.).
         """
 
         if not raw:
@@ -43,7 +47,11 @@ class Policy:
         return path, None
 
     def shell_allowed(self, command: str) -> tuple[bool, str]:
-        """Проверить, разрешена ли простая shell-команда для запуска агентом."""
+        """Решаем, можно ли выполнить одну простую shell-команду в workspace.
+
+        Запрещаем пайпы, редиректы, sudo, rm -rf и похожие фрагменты;
+        allow_shell=false в конфиге отключает shell целиком.
+        """
 
         if not self.cfg.data.get("allow_shell", True):
             return False, "shell disabled by config"

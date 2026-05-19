@@ -1,4 +1,4 @@
-"""Командная строка `madharness-mini`."""
+"""Точка входа: команды `ask`, `run`, `init` и `trace`."""
 
 from __future__ import annotations
 
@@ -13,7 +13,11 @@ from .utils import DEFAULT_CONFIG, STATE_DIR
 
 
 def api_key_prompt(cfg: Config) -> str:
-    """Собрать подсказку для интерактивного ввода API-ключа."""
+    """Текст подсказки при интерактивном вводе API-ключа.
+
+    Показываем, какой маршрутизатор и модель сейчас в конфиге, и куда
+    потом можно дописать настройки вручную.
+    """
 
     base_url = cfg.data.get("base_url") or DEFAULT_CONFIG["base_url"]
     model = cfg.data.get("model") or DEFAULT_CONFIG["model"]
@@ -33,7 +37,11 @@ def api_key_prompt(cfg: Config) -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Разобрать аргументы CLI и выполнить выбранную команду."""
+    """Разбираем argv и запускаем выбранную подкоманду.
+
+    init — записать конфиг; ask/run — диалог с моделью;
+    trace — краткая сводка по файлу трассы.
+    """
 
     parser = argparse.ArgumentParser(prog="madharness-mini")
     sub = parser.add_subparsers(dest="cmd", required=True)

@@ -1,4 +1,4 @@
-"""Клиент для OpenAI-совместимого Chat Completions API."""
+"""HTTP-клиент к OpenAI-совместимому Chat Completions API."""
 
 import datetime as dt
 import json
@@ -12,7 +12,7 @@ from .config import Config
 
 
 class ModelRateLimitError(RuntimeError):
-    """Ошибка лимита LLM API с данными для возможного повтора."""
+    """Провайдер вернул HTTP 429; в атрибутах — Retry-After для повтора."""
 
     def __init__(
         self,
@@ -35,7 +35,10 @@ class ModelRateLimitError(RuntimeError):
 
 
 def parse_retry_after(value: str | None) -> int | None:
-    """Разобрать `Retry-After` в секундах или HTTP-date."""
+    """Переводим заголовок Retry-After в секунды ожидания.
+
+    Поддерживаем число секунд или HTTP-date; неразборное — None.
+    """
 
     if not value:
         return None
@@ -55,16 +58,15 @@ def parse_retry_after(value: str | None) -> int | None:
 
 
 class ModelClient:
-    """Отправляет запросы модели и возвращает ответ API без преобразований."""
+    """Отправляет POST /chat/completions и возвращает сырой JSON ответа API."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
     def settings(self) -> dict[str, Any]:
-        """Получить параметры подключения из `Config`.
+        """Достаём из Config URL, ключ, модель и доп. HTTP-заголовки.
 
-        Метод приводит дополнительные HTTP-заголовки к словарю и подставляет
-        базовый URL по умолчанию, чтобы `chat` отвечал только за HTTP-запрос.
+        Нужен отдельным методом, чтобы chat() занимался только запросом.
         """
 
         headers = self.cfg.data.get("headers") or {}
@@ -82,11 +84,11 @@ class ModelClient:
     def chat(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
-        """Вызвать `/chat/completions` с сообщениями и схемами инструментов.
+        """Один вызов /chat/completions: сообщения и опционально схемы tools.
 
-        При отсутствии ключа метод поднимает `RuntimeError` с инструкцией для
-        пользователя. При HTTP-ошибке тело ответа попадает в текст исключения,
-        чтобы причина была видна в CLI и трассе.
+        Без api_key — RuntimeError с подсказкой про init/env.
+        При HTTP-ошибке тело ответа попадает в текст исключения для CLI и трассы.
+        429 выделяем в ModelRateLimitError для повтора в loop.py.
         """
 
         settings = self.settings()

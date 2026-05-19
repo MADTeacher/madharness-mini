@@ -1,4 +1,4 @@
-"""Запись и чтение JSONL-трасс для запусков `ask` и `run`."""
+"""JSONL-трассы запусков ask/run и команда trace для просмотра."""
 
 import json
 import time
@@ -10,7 +10,7 @@ from .config import Config
 
 
 class Trace:
-    """Записывает события одного запуска в файл трассы."""
+    """Один файл трассы на сессию: события по мере работы ask или run."""
 
     def __init__(self, cfg: Config, kind: str):
         cfg.ensure_dirs()
@@ -19,7 +19,7 @@ class Trace:
         self.write("session_start", kind=kind)
 
     def write(self, event: str, **data: Any) -> None:
-        """Добавить событие в трассу одной JSON-строкой."""
+        """Дописываем одно событие в конец JSONL (модель, tool, конец сессии)."""
 
         record = {"ts": time.time(), "event": event, **data}
         with self.path.open("a", encoding="utf-8") as fh:
@@ -27,7 +27,10 @@ class Trace:
 
 
 def summarize_trace(cfg: Config, trace_id: str) -> str:
-    """Собрать краткую текстовую сводку по найденной трассе."""
+    """Текстовая сводка для CLI: путь, число событий, tool calls, итог.
+
+    trace_id может быть префиксом имени файла в каталоге traces/.
+    """
 
     matches = list((cfg.state_dir / "traces").glob(f"{trace_id}*.jsonl"))
     if not matches:
