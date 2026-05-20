@@ -4,8 +4,6 @@
 единый формат результатов для модели и заготовки для описания параметров инструментов.
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any

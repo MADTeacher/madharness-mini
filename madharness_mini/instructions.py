@@ -1,7 +1,5 @@
 """Системный промпт и проектные инструкции AGENTS.md для модели."""
 
-from __future__ import annotations
-
 from importlib import resources
 from pathlib import Path
 
