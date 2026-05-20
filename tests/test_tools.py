@@ -80,8 +80,25 @@ class ToolTests(HarnessTestCase):
     def test_apply_patch_is_registered(self):
         schemas = ToolRegistry(self.make_cfg()).schemas()
         names = [item["function"]["name"] for item in schemas]
-        self.assertIn("apply_patch", names)
-        self.assertIn("replace_text", names)
+        self.assertEqual(
+            names,
+            [
+                "list_files",
+                "read_file",
+                "write_file",
+                "replace_text",
+                "apply_patch",
+                "search_code",
+                "run_shell",
+            ],
+        )
+
+    def test_unknown_tool_returns_fail_observation(self):
+        obs = ToolRegistry(self.make_cfg()).call("missing_tool", {})
+
+        self.assertFalse(obs["ok"])
+        self.assertEqual(obs["tool"], "missing_tool")
+        self.assertEqual(obs["summary"], "unknown tool")
 
     def test_apply_patch_updates_one_line_with_context(self):
         cfg = self.make_cfg()

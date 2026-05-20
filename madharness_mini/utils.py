@@ -87,7 +87,7 @@ def parse_tool_args(
 
     Модель присылает tool_call с полем function: name и arguments (строка JSON
     или уже словарь). Приводим arguments к dict и возвращаем пару (имя, аргументы)
-    для диспетчера инструментов в tools.py.
+    для диспетчера инструментов.
     """
 
     fn = call.get("function", {})
