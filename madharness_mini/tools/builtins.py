@@ -18,7 +18,6 @@ def builtin_specs() -> list[ToolSpec]:
         LIST_FILES_SPEC,
         READ_FILE_SPEC,
         WRITE_FILE_SPEC,
-        REPLACE_TEXT_SPEC,
         APPLY_PATCH_SPEC,
         SEARCH_CODE_SPEC,
         RUN_SHELL_SPEC,

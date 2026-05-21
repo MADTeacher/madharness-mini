@@ -64,38 +64,6 @@ def write_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     path.write_text(content, encoding="utf-8")
     return ok("write_file", f"wrote {args['path']}", bytes=len(content.encode("utf-8")))
 
-
-def replace_text(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """Заменяем old на new ровно expected_replacements раз в одном файле."""
-
-    path, err = ctx.policy.safe_path(args["path"])
-    if err or not path:
-        return fail("replace_text", err or f"invalid path: {args['path']}")
-    if not path.is_file():
-        return fail("replace_text", f"not a file: {args['path']}")
-    old = args["old"]
-    if old == "":
-        return fail("replace_text", "old text must not be empty")
-    expected = int(args.get("expected_replacements", 1))
-    if expected < 1:
-        return fail("replace_text", "expected_replacements must be at least 1")
-    text = path.read_text(encoding="utf-8")
-    count = text.count(old)
-    if count != expected:
-        return fail(
-            "replace_text",
-            f"expected {expected} replacements, found {count}",
-            replacements=count,
-        )
-    updated = text.replace(old, args["new"])
-    path.write_text(updated, encoding="utf-8")
-    return ok(
-        "replace_text",
-        f"replaced {count} occurrence(s) in {args['path']}",
-        replacements=count,
-    )
-
-
 LIST_FILES_SPEC = ToolSpec(
     "list_files",
     "List workspace files.",
@@ -115,19 +83,4 @@ WRITE_FILE_SPEC = ToolSpec(
     "Write a UTF-8 text file inside the workspace.",
     obj({"path": strp(req=True), "content": strp(req=True)}, ["path", "content"]),
     write_file,
-)
-
-REPLACE_TEXT_SPEC = ToolSpec(
-    "replace_text",
-    "Replace exact text in a UTF-8 file inside the workspace.",
-    obj(
-        {
-            "path": strp(req=True),
-            "old": strp(req=True),
-            "new": strp(req=True),
-            "expected_replacements": intp(1),
-        },
-        ["path", "old", "new"],
-    ),
-    replace_text,
 )
