@@ -73,8 +73,7 @@ class ModelClient:
         if not isinstance(headers, dict):
             headers = {}
         data = {
-            "base_url": self.cfg.data.get("base_url")
-            or "https://openrouter.ai/api/v1",
+            "base_url": self.cfg.data.get("base_url") or "https://openrouter.ai/api/v1",
             "api_key": self.cfg.data.get("api_key") or "",
             "headers": dict(headers),
             "model": self.cfg.data.get("model"),
@@ -82,7 +81,9 @@ class ModelClient:
         return data
 
     def chat(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Один вызов /chat/completions: сообщения и опционально схемы tools.
 

@@ -9,5 +9,8 @@ def load_prompt(name: str) -> str:
     Сейчас используется как минимум `system` — базовые правила агента.
     """
 
-    path = resources.files("madharness_mini").joinpath("prompts", f"{name}.md")
+    path = resources.files("madharness_mini").joinpath(
+        "prompts",
+        f"{name}.md",
+    )
     return path.read_text(encoding="utf-8").rstrip()
