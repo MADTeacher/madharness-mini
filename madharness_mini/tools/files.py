@@ -1,4 +1,4 @@
-"""Файловые инструменты: список, чтение и запись файлов workspace."""
+"""Файловые инструменты: список, чтение и запись файлов в директории workspace"""
 
 import fnmatch
 from typing import Any
@@ -26,9 +26,17 @@ def list_files(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         ):
             results.append(str(path.relative_to(ctx.cfg.root)))
         if len(results) >= 200:
-            return ok("list_files", "listed 200 files", files=results, truncated=True)
+            return ok(
+                "list_files",
+                "listed 200 files",
+                files=results,
+                truncated=True,
+            )
     return ok(
-        "list_files", f"listed {len(results)} files", files=results, truncated=False
+        "list_files",
+        f"listed {len(results)} files",
+        files=results,
+        truncated=False,
     )
 
 
@@ -62,7 +70,12 @@ def write_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = args["content"]
     path.write_text(content, encoding="utf-8")
-    return ok("write_file", f"wrote {args['path']}", bytes=len(content.encode("utf-8")))
+    return ok(
+        "write_file",
+        f"wrote {args['path']}",
+        bytes=len(content.encode("utf-8")),
+    )
+
 
 LIST_FILES_DESCRIPTION = """Recursively list files inside the workspace.
 
@@ -93,11 +106,13 @@ LIST_FILES_SPEC = ToolSpec(
         {
             "path": strp(
                 ".",
-                "Workspace-relative directory or file to inspect; defaults to .",
+                "Workspace-relative directory or file to "
+                "inspect; defaults to .",
             ),
             "glob": strp(
                 "*",
-                "fnmatch-style pattern matched against file names only; defaults to *",
+                "fnmatch-style pattern matched against file names only; "
+                "defaults to *",
             ),
         }
     ),
@@ -109,16 +124,21 @@ READ_FILE_SPEC = ToolSpec(
     READ_FILE_DESCRIPTION,
     obj(
         {
-            "path": strp(req=True, desc="Workspace-relative file path to read."),
+            "path": strp(
+                req=True,
+                desc="Workspace-relative file path to read.",
+            ),
             "start": {
                 "type": "integer",
                 "default": 1,
-                "description": "1-based first line number to include; defaults to 1.",
+                "description": "1-based first line number to include; "
+                "defaults to 1.",
             },
             "end": {
                 "type": "integer",
                 "default": 160,
-                "description": "1-based last line number to include; defaults to start + 160.",
+                "description": "1-based last line number to include; "
+                "defaults to start + 160.",
             },
         },
         ["path"],
@@ -133,11 +153,13 @@ WRITE_FILE_SPEC = ToolSpec(
         {
             "path": strp(
                 req=True,
-                desc="Workspace-relative file path to create or intentionally fully overwrite.",
+                desc="Workspace-relative file path to create or "
+                "intentionally fully overwrite.",
             ),
             "content": strp(
                 req=True,
-                desc="Complete UTF-8 file content to write, including final newline if wanted.",
+                desc="Complete UTF-8 file content to write, including final "
+                "newline if wanted.",
             ),
         },
         ["path", "content"],

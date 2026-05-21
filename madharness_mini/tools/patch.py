@@ -19,27 +19,28 @@ def patch_failure_data(summary: str) -> dict[str, Any]:
     if summary == "expected 1 hunk match, found 0":
         return {
             "hint": (
-                "The update hunk did not match the current file. Use read_file or "
-                "search_code to reread the exact region, then retry apply_patch with "
-                "verbatim current context lines, including spaces."
+                "The update hunk did not match the current file. "
+                "Use read_file or search_code to reread the exact "
+                "region, then retry apply_patch with verbatim "
             ),
             "retryable": True,
         }
     if summary.startswith("expected 1 hunk match, found "):
         return {
             "hint": (
-                "The update hunk matched more than one place. Add more surrounding "
-                "context lines copied exactly from the current file, then retry "
-                "apply_patch."
+                "The update hunk matched more than one place. Add "
+                "more surrounding context lines copied exactly "
+                "from the current file, then retry apply_patch."
             ),
             "retryable": True,
         }
     if summary == "invalid hunk line: ":
         return {
             "hint": (
-                "The update hunk contains a blank line without a marker. Blank "
-                "context lines must still start with one leading space. Reread the "
-                "file region and retry apply_patch with exact context markers."
+                "The update hunk contains a blank line without a marker. "
+                "Blank context lines must still start with one leading space. "
+                "Reread the file region and retry apply_patch with exact "
+                "context markers."
             ),
             "retryable": True,
         }
@@ -52,17 +53,18 @@ def patch_failure_data(summary: str) -> dict[str, Any]:
     ):
         return {
             "hint": (
-                "Send only the patch text, starting with *** Begin Patch and ending "
-                "with *** End Patch. Do not wrap it in a shell command, Markdown "
-                "fence, or extra prose."
+                "Send only the patch text, starting with *** Begin Patch and "
+                "ending with *** End Patch. Do not wrap it in a shell command, "
+                "Markdown fence, or extra prose."
             ),
             "retryable": True,
         }
     if summary == "update hunk must include context or removed lines":
         return {
             "hint": (
-                "An update hunk needs at least one current context or removed line. "
-                "Use read_file to copy exact nearby lines, then retry apply_patch."
+                "An update hunk needs at least one current context or "
+                "removed line. Use read_file to copy exact nearby lines, then "
+                "retry apply_patch."
             ),
             "retryable": True,
         }
@@ -236,6 +238,7 @@ class PatchParser:
         return current[:start] + new_lines + current[end:]
 
 
+# Расширенное описание инструмента apply_patch для LLM
 APPLY_PATCH_DESCRIPTION = """Apply a strict Codex-style patch inside the workspace.
 
 Use this for precise edits to existing files, file creation, deletion, and moves.
@@ -247,6 +250,7 @@ and retry with verbatim context. Do not switch to write_file or run_shell script
 for precise edits.
 """
 
+# Подробное описание аргумента patch для LLM
 PATCH_ARGUMENT_DESCRIPTION = """Strict Codex-style patch text.
 
 Required shape:
@@ -281,6 +285,9 @@ current lines into the hunk, and retry apply_patch once.
 APPLY_PATCH_SPEC = ToolSpec(
     "apply_patch",
     APPLY_PATCH_DESCRIPTION,
-    obj({"patch": strp(req=True, desc=PATCH_ARGUMENT_DESCRIPTION)}, ["patch"]),
+    obj(
+        {"patch": strp(req=True, desc=PATCH_ARGUMENT_DESCRIPTION)},
+        ["patch"],
+    ),
     apply_patch,
 )
