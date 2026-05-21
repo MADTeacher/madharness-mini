@@ -58,7 +58,11 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.cmd == "init":
             api_key = args.api_key
-            if api_key is None and not cfg.data.get("api_key") and not args.no_prompt:
+            if (
+                api_key is None
+                and not cfg.data.get("api_key")
+                and not args.no_prompt
+            ):
                 if sys.stdin.isatty():
                     value = getpass.getpass(api_key_prompt(cfg))
                     api_key = value or None
