@@ -41,6 +41,14 @@ def summarize_trace(cfg: Config, trace_id: str) -> str:
         if line.strip()
     ]
     tools = [e for e in events if e.get("event") == "tool_observation"]
-    end = next((e for e in reversed(events) if e.get("event") == "session_end"), {})
+    end = next(
+        (e for e in reversed(events) if e.get("event") == "session_end"),
+        {},
+    )
     result = str(end.get("result", ""))[:1000]
-    return f"trace: {path}\nevents: {len(events)}\ntool calls: {len(tools)}\nresult: {result}"
+    return (
+        f"trace: {path}\n"
+        f"events: {len(events)}\n"
+        f"tool calls: {len(tools)}\n"
+        f"result: {result}"
+    )

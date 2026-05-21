@@ -1,4 +1,4 @@
-"""Проверки безопасности путей и shell-команд перед инструментами."""
+"""Проверки безопасности путей и shell-команд перед вызовом инструментов"""
 
 import shlex
 from pathlib import Path
@@ -22,7 +22,7 @@ class Policy:
         """Проверяем относительный путь внутри workspace_root.
 
         Успех: (абсолютный Path, None). Отказ: (None, причина) — пустой путь,
-        выход за root, попадание в protected_paths (.git, .env и т.д.).
+        выход за root(корневую директорию проекта), попадание в protected_paths (.git, .env и т.д.).
         """
 
         if not raw:
@@ -75,6 +75,9 @@ class Policy:
             return False, f"invalid shell command: {exc}"
         if not args:
             return False, "empty shell command"
-        if any(token in command for token in ["|", ">", "<", "&&", "||", ";"]):
+        if any(
+            token in command
+            for token in ["|", ">", "<", "&&", "||", ";"]
+        ):
             return False, "shell control operators are denied"
         return True, ""

@@ -8,11 +8,13 @@ from .utils import DEFAULT_CONFIG, STATE_DIR
 
 
 class Config:
-    """Настройки одного запуска CLI: модель, ключ, границы workspace.
+    """Настройки запуска CLI: модель, ключ API и границы рабочего каталога
+    проекта (workspace).
 
-    Слои (позже перекрывают раньше): значения по умолчанию,
-    `.madharness-mini/config.json`, `.env`, переменные MADHARNESS_MINI_*.
-    Поле `root` — абсолютный каталог, внутри которого агент может трогать файлы.
+    При создании значения накладываются слоями — каждый следующий источник
+    заменяет предыдущий: defaults из кода, `.madharness-mini/config.json`,
+    `.env`, переменные `MADHARNESS_MINI_*`.
+    Свойство `root` — уже разрешённый абсолютный путь к каталогу workspace.
     """
 
     def __init__(self, cwd: Path | None = None):
@@ -37,7 +39,10 @@ class Config:
         (self.state_dir / "traces").mkdir(parents=True, exist_ok=True)
         cfg = self.state_dir / "config.json"
         if not cfg.exists():
-            cfg.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+            cfg.write_text(
+                json.dumps(self.data, indent=2),
+                encoding="utf-8",
+            )
 
     def initialize(
         self,
@@ -74,14 +79,15 @@ class Config:
         return cfg, changes
 
     def apply_env(self) -> None:
-        """Подмешиваем в self.data значения из `.env` и окружения процесса.
+        """Подмешиваем в self.data значения из `.env` и переменных окружения.
 
         Учитываются только ключи MADHARNESS_MINI_MODEL, _BASE_URL, _API_KEY.
         """
 
         env = read_env_file(self.cwd / ".env")
         env.update(
-            {k: v for k, v in os.environ.items() if k.startswith("MADHARNESS_MINI_")}
+            {k: v for k, v in os.environ.items() 
+                    if k.startswith("MADHARNESS_MINI_")}
         )
         for field in ("model", "base_url", "api_key"):
             key = f"MADHARNESS_MINI_{field.upper()}"
