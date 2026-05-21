@@ -1,9 +1,21 @@
+from pathlib import Path
+
 from madharness_mini.tools import ToolRegistry
 
 from tests.helpers import HarnessTestCase
 
 
 class ToolTests(HarnessTestCase):
+    def tool_schema_text(self, name):
+        schemas = ToolRegistry(self.make_cfg()).schemas()
+        schema = next(
+            item["function"] for item in schemas if item["function"]["name"] == name
+        )
+        parts = [schema["description"]]
+        for prop in schema["parameters"]["properties"].values():
+            parts.append(prop.get("description", ""))
+        return "\n".join(parts)
+
     def test_read_file_tool(self):
         cfg = self.make_cfg()
         (cfg.root / "hello.txt").write_text("one\ntwo\n", encoding="utf-8")
@@ -29,54 +41,6 @@ class ToolTests(HarnessTestCase):
         )
         self.assertFalse(obs["ok"])
 
-    def test_replace_text_tool_replaces_exact_text(self):
-        cfg = self.make_cfg()
-        path = cfg.root / "hello.txt"
-        path.write_text("one\ntwo\n", encoding="utf-8")
-
-        obs = ToolRegistry(cfg).call(
-            "replace_text",
-            {"path": "hello.txt", "old": "two", "new": "deux"},
-        )
-
-        self.assertTrue(obs["ok"])
-        self.assertEqual(obs["replacements"], 1)
-        self.assertEqual(path.read_text(encoding="utf-8"), "one\ndeux\n")
-
-    def test_replace_text_tool_fails_when_text_is_missing(self):
-        cfg = self.make_cfg()
-        path = cfg.root / "hello.txt"
-        path.write_text("one\ntwo\n", encoding="utf-8")
-
-        obs = ToolRegistry(cfg).call(
-            "replace_text",
-            {"path": "hello.txt", "old": "three", "new": "trois"},
-        )
-
-        self.assertFalse(obs["ok"])
-        self.assertIn("expected 1 replacements, found 0", obs["summary"])
-        self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
-
-    def test_replace_text_tool_fails_on_unexpected_duplicate_match(self):
-        cfg = self.make_cfg()
-        path = cfg.root / "hello.txt"
-        path.write_text("same\nsame\n", encoding="utf-8")
-
-        obs = ToolRegistry(cfg).call(
-            "replace_text",
-            {"path": "hello.txt", "old": "same", "new": "changed"},
-        )
-
-        self.assertFalse(obs["ok"])
-        self.assertIn("expected 1 replacements, found 2", obs["summary"])
-        self.assertEqual(path.read_text(encoding="utf-8"), "same\nsame\n")
-
-    def test_replace_text_tool_respects_path_policy(self):
-        obs = ToolRegistry(self.make_cfg()).call(
-            "replace_text", {"path": "../nope.txt", "old": "a", "new": "b"}
-        )
-        self.assertFalse(obs["ok"])
-
     def test_apply_patch_is_registered(self):
         schemas = ToolRegistry(self.make_cfg()).schemas()
         names = [item["function"]["name"] for item in schemas]
@@ -86,12 +50,85 @@ class ToolTests(HarnessTestCase):
                 "list_files",
                 "read_file",
                 "write_file",
-                "replace_text",
                 "apply_patch",
                 "search_code",
                 "run_shell",
             ],
         )
+
+    def test_apply_patch_schema_describes_strict_patch_format(self):
+        combined = self.tool_schema_text("apply_patch")
+
+        self.assertIn("*** Begin Patch", combined)
+        self.assertIn("*** End Patch", combined)
+        self.assertIn("*** Update File:", combined)
+        self.assertIn("*** Add File:", combined)
+        self.assertIn("*** Delete File:", combined)
+        self.assertIn("*** Move to:", combined)
+        self.assertIn("multiline string", combined)
+        self.assertIn("not a shell command", combined)
+        self.assertIn("context line begins with one space", combined)
+        self.assertIn("-removed line begins with minus", combined)
+        self.assertIn("+added line begins with plus", combined)
+        self.assertIn("reread the current file region", combined)
+        self.assertIn("retry apply_patch", combined)
+
+    def test_list_files_schema_describes_scope_and_limits(self):
+        combined = self.tool_schema_text("list_files")
+
+        self.assertIn("Recursively list files", combined)
+        self.assertIn("files only", combined)
+        self.assertIn("ignored folders", combined)
+        self.assertIn("200", combined)
+        self.assertIn("file name", combined)
+        self.assertIn("defaults to .", combined)
+
+    def test_read_file_schema_describes_numbered_excerpts(self):
+        combined = self.tool_schema_text("read_file")
+
+        self.assertIn("UTF-8 file excerpt", combined)
+        self.assertIn("1-based line numbers", combined)
+        self.assertIn("numbered lines", combined)
+        self.assertIn("Workspace-relative file path", combined)
+
+    def test_write_file_schema_warns_about_full_overwrite(self):
+        combined = self.tool_schema_text("write_file")
+
+        self.assertIn("complete UTF-8 text file", combined)
+        self.assertIn("fully overwrites", combined)
+        self.assertIn("creates parent directories", combined)
+        self.assertIn("Prefer apply_patch", combined)
+        self.assertIn("Do not use write_file as", combined)
+        self.assertIn("failed precise edit", combined)
+
+    def test_search_code_schema_describes_literal_search(self):
+        combined = self.tool_schema_text("search_code")
+
+        self.assertIn("literal substring", combined)
+        self.assertIn("not regex", combined)
+        self.assertIn("not semantic search", combined)
+        self.assertIn("100 matches", combined)
+        self.assertIn("file names only", combined)
+
+    def test_run_shell_schema_describes_policy_limits(self):
+        combined = self.tool_schema_text("run_shell")
+
+        self.assertIn("one allowed command", combined)
+        self.assertIn("workspace root", combined)
+        self.assertIn("60 seconds", combined)
+        self.assertIn("single command", combined)
+        self.assertIn("shell control operators", combined)
+        self.assertIn("rm -rf", combined)
+        self.assertIn("Do not use run_shell to edit files", combined)
+
+    def test_system_prompt_describes_tool_recovery_rules(self):
+        prompt = Path("madharness_mini/prompts/system.md").read_text(encoding="utf-8")
+
+        self.assertIn("If `apply_patch` fails", prompt)
+        self.assertIn("verbatim context", prompt)
+        self.assertIn("not for editing files", prompt)
+        self.assertIn("`command` argument of `run_shell`", prompt)
+        self.assertIn("never use a command itself as a tool name", prompt)
 
     def test_unknown_tool_returns_fail_observation(self):
         obs = ToolRegistry(self.make_cfg()).call("missing_tool", {})
@@ -173,7 +210,9 @@ class ToolTests(HarnessTestCase):
         )
 
         self.assertTrue(obs["ok"])
-        self.assertEqual((cfg.root / "added.txt").read_text(encoding="utf-8"), "hello\nworld\n")
+        self.assertEqual(
+            (cfg.root / "added.txt").read_text(encoding="utf-8"), "hello\nworld\n"
+        )
 
     def test_apply_patch_deletes_file(self):
         cfg = self.make_cfg()
@@ -220,6 +259,8 @@ class ToolTests(HarnessTestCase):
 
         self.assertFalse(obs["ok"])
         self.assertIn("expected 1 hunk match, found 2", obs["summary"])
+        self.assertTrue(obs["retryable"])
+        self.assertIn("Add more surrounding context", obs["hint"])
         self.assertEqual(path.read_text(encoding="utf-8"), "same\nold\nsame\nold\n")
 
     def test_apply_patch_fails_on_missing_context_without_writing(self):
@@ -245,7 +286,62 @@ class ToolTests(HarnessTestCase):
 
         self.assertFalse(obs["ok"])
         self.assertIn("expected 1 hunk match, found 0", obs["summary"])
+        self.assertTrue(obs["retryable"])
+        self.assertIn("reread the exact region", obs["hint"])
+        self.assertIn("verbatim current context", obs["hint"])
         self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    def test_apply_patch_format_failure_explains_patch_boundaries(self):
+        obs = ToolRegistry(self.make_cfg()).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "apply_patch <<'PATCH'",
+                        "*** Begin Patch",
+                        "*** End Patch",
+                        "PATCH",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(obs["ok"])
+        self.assertEqual(obs["summary"], "patch must start with *** Begin Patch")
+        self.assertTrue(obs["retryable"])
+        self.assertIn("starting with *** Begin Patch", obs["hint"])
+        self.assertIn("ending with *** End Patch", obs["hint"])
+        self.assertIn("Do not wrap it in a shell command", obs["hint"])
+
+    def test_apply_patch_blank_hunk_line_explains_context_marker(self):
+        cfg = self.make_cfg()
+        path = cfg.root / "hello.txt"
+        path.write_text("one\n\ntwo\n", encoding="utf-8")
+
+        obs = ToolRegistry(cfg).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: hello.txt",
+                        "@@",
+                        " one",
+                        "",
+                        "-two",
+                        "+deux",
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(obs["ok"])
+        self.assertEqual(obs["summary"], "invalid hunk line: ")
+        self.assertTrue(obs["retryable"])
+        self.assertIn("Blank context lines", obs["hint"])
+        self.assertIn("one leading space", obs["hint"])
+        self.assertEqual(path.read_text(encoding="utf-8"), "one\n\ntwo\n")
 
     def test_apply_patch_moves_file_without_hunk(self):
         cfg = self.make_cfg()

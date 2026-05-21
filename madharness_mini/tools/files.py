@@ -1,9 +1,9 @@
-"""Файловые инструменты: список, чтение, запись и точная замена текста."""
+"""Файловые инструменты: список, чтение и запись файлов workspace."""
 
 import fnmatch
 from typing import Any
 
-from ..utils import clipped, fail, ignored, intp, obj, ok, strp
+from ..utils import clipped, fail, ignored, obj, ok, strp
 from .context import ToolContext
 from .specs import ToolSpec
 
@@ -64,23 +64,83 @@ def write_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     path.write_text(content, encoding="utf-8")
     return ok("write_file", f"wrote {args['path']}", bytes=len(content.encode("utf-8")))
 
+LIST_FILES_DESCRIPTION = """Recursively list files inside the workspace.
+
+Use this to discover repository structure before reading files. Results include
+files only, skip ignored folders such as .git and caches, and stop after 200
+matches. The glob filter matches each file name, not the full relative path.
+"""
+
+READ_FILE_DESCRIPTION = """Read a UTF-8 file excerpt from the workspace.
+
+Use this before editing a file. start and end are 1-based line numbers, and the
+returned content includes numbered lines like "12: text" so later edits can
+refer to the exact surrounding text.
+"""
+
+WRITE_FILE_DESCRIPTION = """Write a complete UTF-8 text file inside the workspace.
+
+This creates parent directories as needed and fully overwrites the target file.
+Prefer apply_patch for precise edits to existing files. Do not use write_file as
+the fallback for a failed precise edit unless you intentionally need a full-file
+rewrite.
+"""
+
 LIST_FILES_SPEC = ToolSpec(
     "list_files",
-    "List workspace files.",
-    obj({"path": strp(".", "directory"), "glob": strp("*", "glob")}),
+    LIST_FILES_DESCRIPTION,
+    obj(
+        {
+            "path": strp(
+                ".",
+                "Workspace-relative directory or file to inspect; defaults to .",
+            ),
+            "glob": strp(
+                "*",
+                "fnmatch-style pattern matched against file names only; defaults to *",
+            ),
+        }
+    ),
     list_files,
 )
 
 READ_FILE_SPEC = ToolSpec(
     "read_file",
-    "Read a file excerpt.",
-    obj({"path": strp(req=True), "start": intp(1), "end": intp(160)}, ["path"]),
+    READ_FILE_DESCRIPTION,
+    obj(
+        {
+            "path": strp(req=True, desc="Workspace-relative file path to read."),
+            "start": {
+                "type": "integer",
+                "default": 1,
+                "description": "1-based first line number to include; defaults to 1.",
+            },
+            "end": {
+                "type": "integer",
+                "default": 160,
+                "description": "1-based last line number to include; defaults to start + 160.",
+            },
+        },
+        ["path"],
+    ),
     read_file,
 )
 
 WRITE_FILE_SPEC = ToolSpec(
     "write_file",
-    "Write a UTF-8 text file inside the workspace.",
-    obj({"path": strp(req=True), "content": strp(req=True)}, ["path", "content"]),
+    WRITE_FILE_DESCRIPTION,
+    obj(
+        {
+            "path": strp(
+                req=True,
+                desc="Workspace-relative file path to create or intentionally fully overwrite.",
+            ),
+            "content": strp(
+                req=True,
+                desc="Complete UTF-8 file content to write, including final newline if wanted.",
+            ),
+        },
+        ["path", "content"],
+    ),
     write_file,
 )
