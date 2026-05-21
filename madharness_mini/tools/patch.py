@@ -8,6 +8,67 @@ from .context import ToolContext
 from .specs import ToolSpec
 
 
+def patch_failure_data(summary: str) -> dict[str, Any]:
+    """Подсказываем модели безопасный следующий шаг после неудачного patch.
+
+    Summary остаётся коротким и совместимым с существующими тестами, а hint
+    объясняет, как восстановиться без перехода к shell-скриптам или полной
+    перезаписи файла.
+    """
+
+    if summary == "expected 1 hunk match, found 0":
+        return {
+            "hint": (
+                "The update hunk did not match the current file. Use read_file or "
+                "search_code to reread the exact region, then retry apply_patch with "
+                "verbatim current context lines, including spaces."
+            ),
+            "retryable": True,
+        }
+    if summary.startswith("expected 1 hunk match, found "):
+        return {
+            "hint": (
+                "The update hunk matched more than one place. Add more surrounding "
+                "context lines copied exactly from the current file, then retry "
+                "apply_patch."
+            ),
+            "retryable": True,
+        }
+    if summary == "invalid hunk line: ":
+        return {
+            "hint": (
+                "The update hunk contains a blank line without a marker. Blank "
+                "context lines must still start with one leading space. Reread the "
+                "file region and retry apply_patch with exact context markers."
+            ),
+            "retryable": True,
+        }
+    if (
+        summary.startswith("patch must ")
+        or summary.startswith("unexpected patch line")
+        or summary.startswith("invalid hunk line")
+        or summary.startswith("add file lines must start")
+        or summary == "Move to is only supported after Update File"
+    ):
+        return {
+            "hint": (
+                "Send only the patch text, starting with *** Begin Patch and ending "
+                "with *** End Patch. Do not wrap it in a shell command, Markdown "
+                "fence, or extra prose."
+            ),
+            "retryable": True,
+        }
+    if summary == "update hunk must include context or removed lines":
+        return {
+            "hint": (
+                "An update hunk needs at least one current context or removed line. "
+                "Use read_file to copy exact nearby lines, then retry apply_patch."
+            ),
+            "retryable": True,
+        }
+    return {}
+
+
 def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """Применяем текстовый patch в формате Codex (add/update/delete)."""
 
@@ -15,7 +76,8 @@ def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     try:
         changes = parser.prepare(args["patch"])
     except ValueError as exc:
-        return fail("apply_patch", str(exc))
+        summary = str(exc)
+        return fail("apply_patch", summary, **patch_failure_data(summary))
     for path, content in changes.items():
         if content is None:
             path.unlink()
@@ -174,9 +236,51 @@ class PatchParser:
         return current[:start] + new_lines + current[end:]
 
 
+APPLY_PATCH_DESCRIPTION = """Apply a strict Codex-style patch inside the workspace.
+
+Use this for precise edits to existing files, file creation, deletion, and moves.
+The patch argument is one multiline string, not a shell command or JSON object.
+The parser is strict: keep markers exactly as shown and include enough context
+for each update hunk to match exactly one place.
+If apply_patch fails, use read_file or search_code to get exact current file text
+and retry with verbatim context. Do not switch to write_file or run_shell scripts
+for precise edits.
+"""
+
+PATCH_ARGUMENT_DESCRIPTION = """Strict Codex-style patch text.
+
+Required shape:
+*** Begin Patch
+*** Update File: path
+@@
+ context line begins with one space
+-removed line begins with minus
++added line begins with plus
+*** End Patch
+
+Supported file operations:
+*** Add File: path       then every content line must start with +
+*** Update File: path    then one or more @@ hunks, or optional Move to
+*** Delete File: path
+*** Move to: path        only immediately after Update File
+
+Compact valid example:
+*** Begin Patch
+*** Update File: hello.txt
+@@
+ old context
+-old text
++new text
+ next context
+*** End Patch
+
+On failure: reread the current file region with read_file/search_code, copy exact
+current lines into the hunk, and retry apply_patch once.
+"""
+
 APPLY_PATCH_SPEC = ToolSpec(
     "apply_patch",
-    "Apply a small Codex-style patch inside the workspace.",
-    obj({"patch": strp(req=True)}, ["patch"]),
+    APPLY_PATCH_DESCRIPTION,
+    obj({"patch": strp(req=True, desc=PATCH_ARGUMENT_DESCRIPTION)}, ["patch"]),
     apply_patch,
 )

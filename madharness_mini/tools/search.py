@@ -45,9 +45,28 @@ def search_code(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+SEARCH_CODE_DESCRIPTION = """Search for a literal substring in workspace files.
+
+Use this to find names, snippets, and exact text before reading or editing. This
+is not regex or semantic search. It scans non-ignored files, returns line
+numbers with previews, filters file names with glob, and stops after 100 matches.
+"""
+
 SEARCH_CODE_SPEC = ToolSpec(
     "search_code",
-    "Search text in workspace files.",
-    obj({"query": strp(req=True), "glob": strp("*")}, ["query"]),
+    SEARCH_CODE_DESCRIPTION,
+    obj(
+        {
+            "query": strp(
+                req=True,
+                desc="Literal substring to find; not regex and not semantic search.",
+            ),
+            "glob": strp(
+                "*",
+                "fnmatch-style pattern matched against file names only; defaults to *",
+            ),
+        },
+        ["query"],
+    ),
     search_code,
 )
