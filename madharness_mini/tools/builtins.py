@@ -1,6 +1,6 @@
 """Явный список встроенных инструментов харнесса."""
 
-from .files import LIST_FILES_SPEC, READ_FILE_SPEC, REPLACE_TEXT_SPEC, WRITE_FILE_SPEC
+from .files import LIST_FILES_SPEC, READ_FILE_SPEC, WRITE_FILE_SPEC
 from .patch import APPLY_PATCH_SPEC
 from .search import SEARCH_CODE_SPEC
 from .shell import RUN_SHELL_SPEC
