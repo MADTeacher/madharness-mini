@@ -22,17 +22,6 @@
         "envFile": "${workspaceFolder}/.env",
         "console": "integratedTerminal",
         "justMyCode": true
-      },
-      {
-        "name": "tests: unittest",
-        "type": "debugpy",
-        "request": "launch",
-        "module": "unittest",
-        "args": ["discover", "-s", "tests"],
-        "cwd": "${workspaceFolder}",
-        "envFile": "${workspaceFolder}/.env",
-        "console": "integratedTerminal",
-        "justMyCode": true
       }
     ]
   }
