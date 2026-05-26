@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
     "api_key": "",
     "temperature": 0.2,
     "max_turns": 50,
+    "context_max_chars": 120000,
+    "context_keep_recent_turns": 3,
     "workspace_root": ".",
     "protected_paths": [".git", ".env", "secrets", "~/.ssh"],
     "allow_shell": True,

@@ -8,19 +8,18 @@ from .shell import RUN_SHELL_SPEC
 from .specs import ToolSpec
 
 
-def builtin_specs() -> list[ToolSpec]:
-    """Возвращаем встроенные инструменты в стабильном порядке для модели.
+class BuiltinToolProvider:
+    """Provider встроенных инструментов в стабильном учебном порядке."""
 
-    Чтобы добавить новый встроенный инструмент, создаём ToolSpec рядом с handler
-    и добавляем его в этот список.
-    """
+    def specs(self, ctx: object) -> list[ToolSpec]:
+        """Отдаём стандартный набор инструментов; ctx пока не нужен."""
 
-    return [
-        LIST_FILES_SPEC,
-        READ_FILE_SPEC,
-        READ_IMAGE_SPEC,
-        WRITE_FILE_SPEC,
-        APPLY_PATCH_SPEC,
-        SEARCH_CODE_SPEC,
-        RUN_SHELL_SPEC,
-    ]
+        return [
+            LIST_FILES_SPEC,
+            READ_FILE_SPEC,
+            READ_IMAGE_SPEC,
+            WRITE_FILE_SPEC,
+            APPLY_PATCH_SPEC,
+            SEARCH_CODE_SPEC,
+            RUN_SHELL_SPEC,
+        ]

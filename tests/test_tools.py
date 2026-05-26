@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from madharness_mini.tools import ToolRegistry
+from madharness_mini.tools.specs import ToolSpec
+from madharness_mini.utils import obj
 
 from tests.helpers import HarnessTestCase
 
@@ -111,6 +113,50 @@ class ToolTests(HarnessTestCase):
                 "run_shell",
             ],
         )
+
+    def test_registry_accepts_extra_tool_provider(self):
+        class ExtraProvider:
+            def specs(self, ctx):
+                return [
+                    ToolSpec(
+                        "extra_tool",
+                        "Extra tool for registry tests.",
+                        obj({}),
+                        lambda ctx, args: {
+                            "ok": True,
+                            "tool": "extra_tool",
+                            "summary": "extra worked",
+                        },
+                    )
+                ]
+
+        registry = ToolRegistry(self.make_cfg(), providers=[ExtraProvider()])
+        names = [item["function"]["name"] for item in registry.schemas()]
+
+        self.assertIn("extra_tool", names)
+        self.assertEqual(
+            registry.call("extra_tool", {}),
+            {"ok": True, "tool": "extra_tool", "summary": "extra worked"},
+        )
+
+    def test_registry_rejects_duplicate_tool_names(self):
+        class DuplicateProvider:
+            def specs(self, ctx):
+                return [
+                    ToolSpec(
+                        "read_file",
+                        "Duplicate tool.",
+                        obj({}),
+                        lambda ctx, args: {
+                            "ok": True,
+                            "tool": "read_file",
+                            "summary": "duplicate",
+                        },
+                    )
+                ]
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate tool name: read_file"):
+            ToolRegistry(self.make_cfg(), providers=[DuplicateProvider()])
 
     def test_apply_patch_schema_describes_strict_patch_format(self):
         combined = self.tool_schema_text("apply_patch")

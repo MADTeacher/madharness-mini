@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from .context import ToolContext
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], dict[str, Any]]
+
+
+class ToolProvider(Protocol):
+    """Источник ToolSpec для встроенных и будущих внешних инструментов."""
+
+    def specs(self, ctx: "ToolContext") -> Iterable["ToolSpec"]:
+        """Возвращаем инструменты, доступные в данном tool context."""
 
 
 @dataclass

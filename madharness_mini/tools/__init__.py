@@ -1,6 +1,6 @@
-"""Пакет инструментов агента: registry, specs и встроенные handlers."""
+"""Пакет инструментов агента: диспетчер, спецификации, поставщики"""
 
 from .registry import ToolRegistry
-from .specs import ToolSpec
+from .specs import ToolProvider, ToolSpec
 
-__all__ = ["ToolRegistry", "ToolSpec"]
+__all__ = ["ToolProvider", "ToolRegistry", "ToolSpec"]
