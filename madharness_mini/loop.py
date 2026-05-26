@@ -92,17 +92,17 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
 
     trace = Trace(cfg, "run")
     client = ModelClient(cfg)
-    registry = ToolRegistry(cfg)
+    tools_registry = ToolRegistry(cfg)
     messages = base_messages(cfg, task)
     for turn in range(int(cfg.data["max_turns"])):
         trace.write(
             "model_call_started",
             turn=turn,
-            tools_count=len(registry.tools),
+            tools_count=len(tools_registry.tools),
         )
         try:
             raw = call_model_with_rate_limit_retry(
-                client, trace, messages, registry.schemas(), turn=turn
+                client, trace, messages, tools_registry.schemas(), turn=turn
             )
         except RuntimeError as exc:
             trace.write("model_error", turn=turn, error=str(exc))
@@ -119,7 +119,7 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
         for call in calls:
             try:
                 name, args = parse_tool_args(call)
-                obs = registry.call(name, args)
+                obs = tools_registry.call(name, args)
             except Exception as exc:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")

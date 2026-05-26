@@ -50,9 +50,7 @@ RUN_SHELL_SPEC = ToolSpec(
         {
             "command": strp(
                 req=True,
-                desc="Single safe command with arguments, run from the "
-                "workspace root; no shell control operators and no "
-                "file-editing scripts.",
+                desc="Single safe command with arguments, run from the workspace root; no shell control operators and no file-editing scripts.",
             )
         },
         ["command"],

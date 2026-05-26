@@ -1,12 +1,14 @@
 """Диспетчер инструментов: регистрация, схемы и безопасный вызов."""
 
+from collections.abc import Iterable
 from typing import Any
 
 from ..config import Config
 from ..policy import Policy
 from ..utils import fail
-from .builtins import builtin_specs
+from .builtins import BuiltinToolProvider
 from .context import ToolContext
+from .specs import ToolProvider
 
 
 class ToolRegistry:
@@ -16,11 +18,25 @@ class ToolRegistry:
     ToolSpec, отдаёт схемы модели и превращает исключения в fail-наблюдения.
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(
+        self,
+        cfg: Config,
+        # используем для регистрации внешних инструментов, не
+        # входящих в стандартный набор встроенных инструментов
+        providers: Iterable[ToolProvider] | None = None,
+    ):
         self.cfg = cfg
         self.policy = Policy(cfg)
         self.context = ToolContext(cfg, self.policy)
-        self.tools = {tool.name: tool for tool in builtin_specs()}
+        self.providers = [BuiltinToolProvider(), *list(providers or [])]
+        self.tools = {}
+        for provider in self.providers:
+            # получаем список ToolSpec от каждого provider
+            # и регистрируем их в словаре self.tools
+            for tool in provider.specs(self.context):
+                if tool.name in self.tools:
+                    raise RuntimeError(f"duplicate tool name: {tool.name}")
+                self.tools[tool.name] = tool
 
     def schemas(self) -> list[dict[str, Any]]:
         """Список схем для поля tools в запросе к модели."""

@@ -59,13 +59,11 @@ SEARCH_CODE_SPEC = ToolSpec(
         {
             "query": strp(
                 req=True,
-                desc="Literal substring to find; not regex and not "
-                "semantic search.",
+                desc="Literal substring to find; not regex and not semantic search.",
             ),
             "glob": strp(
                 "*",
-                "fnmatch-style pattern matched against file names only; "
-                "defaults to *",
+                "fnmatch-style pattern matched against file names only; defaults to *",
             ),
         },
         ["query"],
