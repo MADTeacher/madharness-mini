@@ -4,6 +4,8 @@ from madharness_mini.tools import ToolRegistry
 
 from tests.helpers import HarnessTestCase
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
 
 class ToolTests(HarnessTestCase):
     def tool_schema_text(self, name):
@@ -24,6 +26,59 @@ class ToolTests(HarnessTestCase):
         )
         self.assertTrue(obs["ok"])
         self.assertIn("1: one", obs["content"])
+
+    def test_read_image_tool_returns_metadata_without_base64(self):
+        cfg = self.make_cfg()
+        (cfg.root / "shot.png").write_bytes(PNG_BYTES)
+
+        obs = ToolRegistry(cfg).call("read_image", {"path": "shot.png"})
+
+        self.assertTrue(obs["ok"])
+        self.assertEqual(obs["mime_type"], "image/png")
+        self.assertEqual(obs["bytes"], len(PNG_BYTES))
+        self.assertEqual(obs["detail"], "auto")
+        self.assertFalse(obs["attached"])
+        self.assertNotIn("data:image", str(obs))
+
+    def test_read_image_tool_marks_attachment_when_enabled(self):
+        cfg = self.make_cfg()
+        cfg.data["supports_image_input"] = True
+        (cfg.root / "shot.png").write_bytes(PNG_BYTES)
+
+        obs = ToolRegistry(cfg).call(
+            "read_image", {"path": "shot.png", "detail": "high"}
+        )
+
+        self.assertTrue(obs["ok"])
+        self.assertTrue(obs["attached"])
+        self.assertEqual(obs["detail"], "high")
+
+    def test_read_image_tool_rejects_policy_and_bad_inputs(self):
+        cfg = self.make_cfg()
+        (cfg.root / ".env").write_bytes(PNG_BYTES)
+        (cfg.root / "bad.txt").write_bytes(PNG_BYTES)
+
+        protected = ToolRegistry(cfg).call("read_image", {"path": ".env"})
+        outside = ToolRegistry(cfg).call("read_image", {"path": "../shot.png"})
+        unsupported = ToolRegistry(cfg).call("read_image", {"path": "bad.txt"})
+        invalid_detail = ToolRegistry(cfg).call(
+            "read_image", {"path": "bad.txt", "detail": "microscope"}
+        )
+
+        self.assertFalse(protected["ok"])
+        self.assertFalse(outside["ok"])
+        self.assertFalse(unsupported["ok"])
+        self.assertFalse(invalid_detail["ok"])
+
+    def test_read_image_tool_rejects_large_file(self):
+        cfg = self.make_cfg()
+        cfg.data["max_image_bytes"] = 4
+        (cfg.root / "shot.png").write_bytes(PNG_BYTES)
+
+        obs = ToolRegistry(cfg).call("read_image", {"path": "shot.png"})
+
+        self.assertFalse(obs["ok"])
+        self.assertIn("too large", obs["summary"])
 
     def test_write_file_tool_creates_parent_dirs(self):
         cfg = self.make_cfg()
@@ -49,6 +104,7 @@ class ToolTests(HarnessTestCase):
             [
                 "list_files",
                 "read_file",
+                "read_image",
                 "write_file",
                 "apply_patch",
                 "search_code",
@@ -90,6 +146,15 @@ class ToolTests(HarnessTestCase):
         self.assertIn("1-based line numbers", combined)
         self.assertIn("numbered lines", combined)
         self.assertIn("Workspace-relative file path", combined)
+
+    def test_read_image_schema_describes_text_only_fallback(self):
+        combined = self.tool_schema_text("read_image")
+
+        self.assertIn("PNG, JPEG, WEBP", combined)
+        self.assertIn("non-animated GIF", combined)
+        self.assertIn("metadata only", combined)
+        self.assertIn("supports_image_input", combined)
+        self.assertIn("must not claim", combined)
 
     def test_write_file_schema_warns_about_full_overwrite(self):
         combined = self.tool_schema_text("write_file")

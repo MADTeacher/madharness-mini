@@ -7,10 +7,12 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
-from madharness_mini.loop import ask
+from madharness_mini.loop import ask, run_agent
 from madharness_mini.model import ModelClient, ModelRateLimitError, parse_retry_after
 
 from tests.helpers import HarnessTestCase
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
 
 
 class ModelLoopTests(HarnessTestCase):
@@ -136,3 +138,89 @@ class ModelLoopTests(HarnessTestCase):
                 ask("hello", cfg)
 
         sleep.assert_called_once_with(1)
+
+    def test_run_agent_keeps_image_text_only_when_vision_is_disabled(self):
+        cfg = self.make_cfg()
+        (cfg.root / "shot.png").write_bytes(PNG_BYTES)
+        seen_messages = []
+
+        def fake_chat(messages, tools=None):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            if len(seen_messages) == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "function": {
+                                            "name": "read_image",
+                                            "arguments": json.dumps({"path": "shot.png"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": "done"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+            result, trace_path = run_agent("inspect screenshot", cfg)
+
+        self.assertEqual(result, "done")
+        second_request = json.dumps(seen_messages[1])
+        self.assertNotIn("data:image", second_request)
+        self.assertNotIn("base64", second_request)
+        trace_text = Path(trace_path).read_text(encoding="utf-8")
+        self.assertNotIn("data:image", trace_text)
+        self.assertNotIn("base64", trace_text)
+
+    def test_run_agent_attaches_image_when_vision_is_enabled(self):
+        cfg = self.make_cfg()
+        cfg.data["supports_image_input"] = True
+        (cfg.root / "shot.png").write_bytes(PNG_BYTES)
+        seen_messages = []
+
+        def fake_chat(messages, tools=None):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            if len(seen_messages) == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "function": {
+                                            "name": "read_image",
+                                            "arguments": json.dumps({"path": "shot.png"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": "done"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+            result, trace_path = run_agent("inspect screenshot", cfg)
+
+        self.assertEqual(result, "done")
+        image_messages = [
+            message
+            for message in seen_messages[1]
+            if message.get("role") == "user" and isinstance(message.get("content"), list)
+        ]
+        self.assertEqual(len(image_messages), 1)
+        image_part = image_messages[0]["content"][1]
+        self.assertEqual(image_part["type"], "image_url")
+        self.assertEqual(image_part["image_url"]["detail"], "auto")
+        self.assertIn("data:image/png;base64,", image_part["image_url"]["url"])
+        trace_text = Path(trace_path).read_text(encoding="utf-8")
+        self.assertNotIn("data:image", trace_text)
+        self.assertNotIn("base64", trace_text)

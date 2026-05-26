@@ -25,6 +25,9 @@ DEFAULT_CONFIG = {
     "workspace_root": ".",
     "protected_paths": [".git", ".env", "secrets", "~/.ssh"],
     "allow_shell": True,
+    "supports_image_input": False,
+    "max_image_bytes": 5000000,
+    "image_detail": "auto",
 }
 
 

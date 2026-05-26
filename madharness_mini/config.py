@@ -6,6 +6,8 @@ from pathlib import Path
 
 from .utils import DEFAULT_CONFIG, STATE_DIR
 
+IMAGE_DETAIL_VALUES = {"auto", "low", "high", "original"}
+
 
 class Config:
     """Настройки одного запуска CLI: модель, ключ, границы workspace.
@@ -76,7 +78,8 @@ class Config:
     def apply_env(self) -> None:
         """Подмешиваем в self.data значения из `.env` и окружения процесса.
 
-        Учитываются только ключи MADHARNESS_MINI_MODEL, _BASE_URL, _API_KEY.
+        Простые строковые поля берём как есть, а vision-настройки приводим
+        к типам конфига: bool, int и ограниченный набор detail-режимов.
         """
 
         env = read_env_file(self.cwd / ".env")
@@ -87,6 +90,24 @@ class Config:
             key = f"MADHARNESS_MINI_{field.upper()}"
             if env.get(key):
                 self.data[field] = env[key]
+        if env.get("MADHARNESS_MINI_SUPPORTS_IMAGE_INPUT"):
+            self.data["supports_image_input"] = parse_bool_env(
+                "MADHARNESS_MINI_SUPPORTS_IMAGE_INPUT",
+                env["MADHARNESS_MINI_SUPPORTS_IMAGE_INPUT"],
+            )
+        if env.get("MADHARNESS_MINI_MAX_IMAGE_BYTES"):
+            self.data["max_image_bytes"] = parse_int_env(
+                "MADHARNESS_MINI_MAX_IMAGE_BYTES",
+                env["MADHARNESS_MINI_MAX_IMAGE_BYTES"],
+            )
+        if env.get("MADHARNESS_MINI_IMAGE_DETAIL"):
+            detail = env["MADHARNESS_MINI_IMAGE_DETAIL"].strip()
+            if detail not in IMAGE_DETAIL_VALUES:
+                allowed = ", ".join(sorted(IMAGE_DETAIL_VALUES))
+                raise RuntimeError(
+                    f"invalid MADHARNESS_MINI_IMAGE_DETAIL: {detail}; allowed: {allowed}"
+                )
+            self.data["image_detail"] = detail
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -104,3 +125,30 @@ def read_env_file(path: Path) -> dict[str, str]:
             key, value = line.split("=", 1)
             data[key.strip()] = value.strip().strip("'\"")
     return data
+
+
+def parse_bool_env(name: str, value: str) -> bool:
+    """Читаем булевы настройки из `.env` без неявной магии shell.
+
+    Явные true/false удобнее для учебного конфига: ошибка в значении не прячется
+    и не включает vision-режим случайно.
+    """
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"invalid {name}: {value}; expected true or false")
+
+
+def parse_int_env(name: str, value: str) -> int:
+    """Читаем целочисленные лимиты из `.env` и отсекаем отрицательные значения."""
+
+    try:
+        parsed = int(value.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"invalid {name}: {value}; expected integer") from exc
+    if parsed < 0:
+        raise RuntimeError(f"invalid {name}: {value}; expected non-negative integer")
+    return parsed

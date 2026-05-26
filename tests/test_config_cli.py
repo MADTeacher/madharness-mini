@@ -63,6 +63,42 @@ class ConfigCliTests(HarnessTestCase):
         self.assertEqual(cfg.data["model"], "deepseek/deepseek-v4-flash")
         self.assertEqual(ModelClient(cfg).settings()["api_key"], "secret")
 
+    def test_env_file_overrides_image_settings_with_types(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
+        (root / ".env").write_text(
+            "MADHARNESS_MINI_SUPPORTS_IMAGE_INPUT=true\n"
+            "MADHARNESS_MINI_MAX_IMAGE_BYTES=42\n"
+            "MADHARNESS_MINI_IMAGE_DETAIL=high\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(root)
+
+        self.addCleanup(tmp.cleanup)
+        self.assertIs(cfg.data["supports_image_input"], True)
+        self.assertEqual(cfg.data["max_image_bytes"], 42)
+        self.assertEqual(cfg.data["image_detail"], "high")
+
+    def test_env_file_rejects_unknown_image_detail(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
+        (root / ".env").write_text(
+            "MADHARNESS_MINI_IMAGE_DETAIL=microscope\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "MADHARNESS_MINI_IMAGE_DETAIL"):
+                Config(root)
+
+        self.addCleanup(tmp.cleanup)
+
     def test_init_command_creates_config_with_api_key(self):
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name)

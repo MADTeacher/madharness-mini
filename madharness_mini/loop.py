@@ -107,6 +107,7 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
             result = message.get("content") or ""
             trace.write("session_end", result=result)
             return result, trace.path
+        followup_messages: list[dict[str, Any]] = []
         for call in calls:
             try:
                 name, args = parse_tool_args(call)
@@ -114,6 +115,7 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
             except Exception as exc:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")
+            followup_messages.extend(obs.pop("_followup_messages", []))
             trace.write("tool_observation", tool=name, args=args, observation=obs)
             content = json.dumps(obs, ensure_ascii=False)
             messages.append(
@@ -123,6 +125,8 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
                     "content": content,
                 }
             )
+        # Сначала закрываем все tool_calls role=tool, затем добавляем доп. ввод.
+        messages.extend(followup_messages)
     result = "Agent stopped: max_turns exceeded."
     trace.write("session_end", result=result)
     return result, trace.path
