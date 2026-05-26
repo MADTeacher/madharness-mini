@@ -21,8 +21,7 @@ class ToolRegistry:
     def __init__(
         self,
         cfg: Config,
-        # используем для регистрации внешних инструментов, не
-        # входящих в стандартный набор встроенных инструментов
+        # Добавляем внешние наборы инструментов поверх стандартных встроенных.
         providers: Iterable[ToolProvider] | None = None,
     ):
         self.cfg = cfg
@@ -31,8 +30,6 @@ class ToolRegistry:
         self.providers = [BuiltinToolProvider(), *list(providers or [])]
         self.tools = {}
         for provider in self.providers:
-            # получаем список ToolSpec от каждого provider
-            # и регистрируем их в словаре self.tools
             for tool in provider.specs(self.context):
                 if tool.name in self.tools:
                     raise RuntimeError(f"duplicate tool name: {tool.name}")

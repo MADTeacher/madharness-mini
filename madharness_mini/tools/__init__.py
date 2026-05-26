@@ -1,4 +1,4 @@
-"""Пакет инструментов агента: диспетчер, спецификации, поставщики"""
+"""Пакет инструментов агента: диспетчер, спецификации, поставщики."""
 
 from .registry import ToolRegistry
 from .specs import ToolProvider, ToolSpec

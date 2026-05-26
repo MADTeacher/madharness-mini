@@ -1,10 +1,10 @@
 """Режимы ask (один ответ) и run (цикл с инструментами)."""
 
+import json
 import time
 from typing import Any
 
 from .config import Config
-from .context import ContextFragment, ContextManager
 from .instructions import load_project_instructions, load_prompt
 from .model import ModelClient, ModelRateLimitError
 from .tools import ToolRegistry
@@ -15,32 +15,17 @@ from .utils import fail, parse_tool_args
 RATE_LIMIT_RETRY_MAX_SECONDS = 60
 
 
-def base_context(cfg: Config, task: str) -> ContextManager:
-    """Готовим слой контекста для ask/run: system, AGENTS.md и задача.
+def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
+    """Стартовая история чата: system + задача пользователя.
 
-    Сам ContextManager не читает файлы и не знает про Config. Loop передаёт ему
-    уже готовый системный текст, чтобы граница слоя контекста оставалась простой.
+    В system попадают встроенный промпт и, если есть, AGENTS.md из проекта.
     """
 
-    context = ContextManager(
-        task,
-        max_chars=int(cfg.data.get("context_max_chars", 120000)),
-        keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
-    )
     system = load_prompt("system")
     project_instructions = load_project_instructions(cfg)
     if project_instructions:
         system = f"{system}\n\n# Project instructions\n\n{project_instructions}"
-    context.add_fragment(
-        ContextFragment(
-            id="system",
-            source="madharness_mini/prompts/system.md",
-            text=system,
-            priority=0,
-            placement="system",
-        )
-    )
-    return context
+    return [{"role": "system", "content": system}, {"role": "user", "content": task}]
 
 
 def call_model_with_rate_limit_retry(
@@ -79,8 +64,7 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
     """
 
     trace = Trace(cfg, "ask")
-    context = base_context(cfg, task)
-    messages = context.messages()
+    messages = base_messages(cfg, task)
     trace.write("model_call_started", tools_count=0)
     try:
         raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
@@ -104,9 +88,8 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     trace = Trace(cfg, "run")
     client = ModelClient(cfg)
     tools_registry = ToolRegistry(cfg)
-    context = base_context(cfg, task)
+    messages = base_messages(cfg, task)
     for turn in range(int(cfg.data["max_turns"])):
-        messages = context.messages()
         trace.write("model_call_started", turn=turn, tools_count=len(tools_registry.tools))
         try:
             raw = call_model_with_rate_limit_retry(
@@ -118,12 +101,13 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
             raise
         message = raw["choices"][0]["message"]
         trace.write("model_call_finished", turn=turn, message=message)
-        context.record_assistant(message)
+        messages.append(message)
         calls = message.get("tool_calls") or []
         if not calls:
             result = message.get("content") or ""
             trace.write("session_end", result=result)
             return result, trace.path
+        followup_messages: list[dict[str, Any]] = []
         for call in calls:
             try:
                 name, args = parse_tool_args(call)
@@ -131,9 +115,18 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
             except Exception as exc:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")
-            followup_messages = obs.pop("_followup_messages", [])
+            followup_messages.extend(obs.pop("_followup_messages", []))
             trace.write("tool_observation", tool=name, args=args, observation=obs)
-            context.record_tool_result(call, obs, followup_messages)
+            content = json.dumps(obs, ensure_ascii=False)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id", name),
+                    "content": content,
+                }
+            )
+        # Сначала закрываем все tool_calls role=tool, затем добавляем доп. ввод.
+        messages.extend(followup_messages)
     result = "Agent stopped: max_turns exceeded."
     trace.write("session_end", result=result)
     return result, trace.path

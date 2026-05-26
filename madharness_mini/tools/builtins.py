@@ -9,7 +9,7 @@ from .specs import ToolSpec
 
 
 class BuiltinToolProvider:
-    """Provider встроенных инструментов в стабильном учебном порядке."""
+    """Поставщик встроенных инструментов в стабильном учебном порядке."""
 
     def specs(self, ctx: object) -> list[ToolSpec]:
         """Отдаём стандартный набор инструментов; ctx пока не нужен."""

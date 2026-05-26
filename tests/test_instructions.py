@@ -10,15 +10,15 @@ from madharness_mini.instructions import (
     load_project_instructions,
     load_prompt,
 )
-from madharness_mini.loop import base_context
+from madharness_mini.loop import base_messages
 
 from tests.helpers import HarnessTestCase
 
 
 class InstructionTests(HarnessTestCase):
-    def test_base_context_loads_system_prompt_from_markdown(self):
+    def test_base_messages_loads_system_prompt_from_markdown(self):
         cfg = self.make_cfg()
-        messages = base_context(cfg, "Return a short greeting").messages()
+        messages = base_messages(cfg, "Return a short greeting")
         system_prompt = load_prompt("system")
 
         self.assertEqual(messages[0]["role"], "system")
@@ -30,13 +30,13 @@ class InstructionTests(HarnessTestCase):
             messages[1], {"role": "user", "content": "Return a short greeting"}
         )
 
-    def test_base_context_appends_root_agents_md(self):
+    def test_base_messages_appends_root_agents_md(self):
         cfg = self.make_cfg()
         (cfg.root / "AGENTS.md").write_text(
             "Use the project test command.\n", encoding="utf-8"
         )
 
-        messages = base_context(cfg, "Return a short greeting").messages()
+        messages = base_messages(cfg, "Return a short greeting")
 
         self.assertTrue(messages[0]["content"].startswith(load_prompt("system")))
         self.assertIn("# Project instructions", messages[0]["content"])
@@ -47,10 +47,7 @@ class InstructionTests(HarnessTestCase):
         (cfg.root / "AGENTS.md").write_text("  \n\n", encoding="utf-8")
 
         self.assertEqual(load_project_instructions(cfg), "")
-        self.assertEqual(
-            base_context(cfg, "hello").messages()[0]["content"],
-            load_prompt("system"),
-        )
+        self.assertEqual(base_messages(cfg, "hello")[0]["content"], load_prompt("system"))
 
     def test_nested_agents_md_is_appended_after_root_file(self):
         tmp = tempfile.TemporaryDirectory()
