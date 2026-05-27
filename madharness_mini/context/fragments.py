@@ -35,7 +35,7 @@ class ContextState:
     user_task: str
     fragments_count: int
     history_entries: int
-    max_chars: int
+    max_tokens: int
     keep_recent_turns: int
 
 

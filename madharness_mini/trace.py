@@ -41,6 +41,42 @@ def summarize_trace(cfg: Config, trace_id: str) -> str:
         if line.strip()
     ]
     tools = [e for e in events if e.get("event") == "tool_observation"]
+    reports = [
+        e["context_report"]
+        for e in events
+        if isinstance(e.get("context_report"), dict)
+    ]
     end = next((e for e in reversed(events) if e.get("event") == "session_end"), {})
     result = str(end.get("result", ""))[:1000]
-    return f"trace: {path}\nevents: {len(events)}\ntool calls: {len(tools)}\nresult: {result}"
+    lines = [
+        f"trace: {path}",
+        f"events: {len(events)}",
+        f"tool calls: {len(tools)}",
+    ]
+    if reports:
+        lines.append(_summarize_context_report(reports[-1]))
+    lines.append(f"result: {result}")
+    return "\n".join(lines)
+
+
+def _summarize_context_report(report: dict[str, Any]) -> str:
+    """Показываем в CLI короткую строку о последней сборке контекста."""
+
+    history = report.get("history")
+    if not isinstance(history, dict):
+        history = {}
+    fragments = report.get("fragments")
+    request_tokens = int(report.get("request_tokens_estimate") or 0)
+    max_tokens = int(report.get("max_tokens") or 0)
+    tools_tokens = int(report.get("tools_tokens_estimate") or 0)
+    total_entries = int(history.get("total_entries") or 0)
+    rendered_entries = int(history.get("rendered_entries") or 0)
+    clipped = len(history.get("clipped_tool_messages") or [])
+    dropped = len(history.get("dropped_entries") or [])
+    return (
+        f"context: {request_tokens}/{max_tokens} estimated tokens; "
+        f"tools: {tools_tokens}; "
+        f"fragments: {len(fragments or [])}; "
+        f"history: {rendered_entries}/{total_entries} entries; "
+        f"clipped tool messages: {clipped}; dropped entries: {dropped}"
+    )

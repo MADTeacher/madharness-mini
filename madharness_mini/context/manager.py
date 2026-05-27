@@ -7,7 +7,12 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
-from .budget import clip_tool_messages, messages_chars
+from .budget import (
+    TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+    clip_tool_messages,
+    estimate_request_tokens,
+    estimate_tokens,
+)
 from .fragments import ContextFragment, ContextProvider, ContextState
 from .history import HistoryEntry
 from .render import render_messages
@@ -25,17 +30,18 @@ class ContextManager:
         self,
         user_task: str,
         *,
-        max_chars: int = 120000,
+        max_tokens: int = 60000,
         keep_recent_turns: int = 3,
         providers: Iterable[ContextProvider] | None = None,
     ):
         self.user_task = user_task
-        self.max_chars = max(int(max_chars), 0)
+        self.max_tokens = max(int(max_tokens), 0)
         self.keep_recent_turns = max(int(keep_recent_turns), 0)
         self.providers = list(providers or [])
         self._fragments: list[ContextFragment] = []
         self._history: list[HistoryEntry] = []
         self._last_stats: dict[str, int | bool] | None = None
+        self._last_report: dict[str, Any] | None = None
 
     def add_fragment(self, fragment: ContextFragment) -> None:
         """Добавляем или заменяем фрагмент по id."""
@@ -43,6 +49,7 @@ class ContextManager:
         self._fragments = [item for item in self._fragments if item.id != fragment.id]
         self._fragments.append(fragment)
         self._last_stats = None
+        self._last_report = None
 
     def record_assistant(self, message: dict[str, Any]) -> None:
         """Запоминаем ответ модели как следующий атомарный элемент истории."""
@@ -63,6 +70,7 @@ class ContextManager:
             )
         )
         self._last_stats = None
+        self._last_report = None
 
     def record_tool_result(
         self,
@@ -84,33 +92,75 @@ class ContextManager:
         entry.seen_tool_call_ids.add(call_id)
         entry.pending_followups.extend(copy.deepcopy(list(followup_messages)))
         self._last_stats = None
+        self._last_report = None
 
-    def messages(self) -> list[dict[str, Any]]:
+    def messages(self, tools: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Возвращаем сообщения для модели с учётом бюджета контекста."""
 
         fragments = self._collect_fragments()
         entries = copy.deepcopy(self._history)
+        entry_indexes = list(range(len(entries)))
         messages = render_messages(self.user_task, fragments, entries)
+        initial_estimate = estimate_request_tokens(messages, tools)
+        initial_tokens = initial_estimate["request_tokens_estimate"]
         truncated = False
-        dropped_entries = 0
+        dropped_entries: list[dict[str, Any]] = []
+        clipped_tool_messages: list[dict[str, Any]] = []
+        clip_limit_chars = 0
 
-        if self.max_chars and messages_chars(messages) > self.max_chars:
-            clip_limit = max(80, min(4000, self.max_chars // 8))
-            if clip_tool_messages(entries, clip_limit):
+        if self.max_tokens and initial_tokens > self.max_tokens:
+            clip_limit_chars = max(
+                80,
+                min(4000, self.max_tokens * TOKEN_ESTIMATE_BYTES_PER_TOKEN // 8),
+            )
+            clipped_tool_messages = clip_tool_messages(entries, clip_limit_chars)
+            if clipped_tool_messages:
                 truncated = True
                 messages = render_messages(self.user_task, fragments, entries)
 
-        if self.max_chars and messages_chars(messages) > self.max_chars:
-            dropped_entries = self._drop_old_entries_until_budget(fragments, entries)
+        current_estimate = estimate_request_tokens(messages, tools)
+        if (
+            self.max_tokens
+            and current_estimate["request_tokens_estimate"] > self.max_tokens
+        ):
+            dropped_entries = self._drop_old_entries_until_budget(
+                fragments,
+                entries,
+                entry_indexes,
+                tools,
+            )
             messages = render_messages(self.user_task, fragments, entries)
-            truncated = truncated or dropped_entries > 0
+            truncated = truncated or bool(dropped_entries)
+            current_estimate = estimate_request_tokens(messages, tools)
 
         self._last_stats = {
-            "context_chars": messages_chars(messages),
+            "context_tokens_estimate": current_estimate["request_tokens_estimate"],
+            "messages_tokens_estimate": current_estimate["messages_tokens_estimate"],
+            "tools_tokens_estimate": current_estimate["tools_tokens_estimate"],
             "fragments": len(fragments),
             "history_entries": len(self._history),
-            "dropped_entries": dropped_entries,
+            "dropped_entries": len(dropped_entries),
             "truncated": truncated,
+        }
+        self._last_report = {
+            "max_tokens": self.max_tokens,
+            "initial_request_tokens_estimate": initial_tokens,
+            **current_estimate,
+            "over_budget": bool(self.max_tokens and initial_tokens > self.max_tokens),
+            "truncated": truncated,
+            "fragments": [_fragment_report(fragment) for fragment in fragments],
+            "history": {
+                "total_entries": len(self._history),
+                "rendered_entries": len(entries),
+                "keep_recent_turns": self.keep_recent_turns,
+                "clip_limit_chars": clip_limit_chars,
+                "clipped_tool_messages": clipped_tool_messages,
+                "dropped_entries": dropped_entries,
+                "included_entries": [
+                    _history_entry_report(entry, index)
+                    for index, entry in zip(entry_indexes, entries)
+                ],
+            },
         }
         return messages
 
@@ -120,6 +170,18 @@ class ContextManager:
         if self._last_stats is None:
             self.messages()
         return dict(self._last_stats or {})
+
+    def report(self) -> dict[str, Any]:
+        """Подробно описываем последнюю сборку контекста без текстов сообщений.
+
+        Отчёт нужен для трасс и отладки бюджета: он показывает размеры,
+        фрагменты, оставшуюся историю и действия обрезки, но не дублирует
+        содержимое prompt/tool output.
+        """
+
+        if self._last_report is None:
+            self.messages()
+        return copy.deepcopy(self._last_report or {})
 
     def _last_tool_entry(self) -> HistoryEntry:
         """Находим последний tool turn или создаём защитный entry для сбоя."""
@@ -137,7 +199,7 @@ class ContextManager:
             user_task=self.user_task,
             fragments_count=len(self._fragments),
             history_entries=len(self._history),
-            max_chars=self.max_chars,
+            max_tokens=self.max_tokens,
             keep_recent_turns=self.keep_recent_turns,
         )
         fragments = list(self._fragments)
@@ -152,24 +214,63 @@ class ContextManager:
         self,
         fragments: list[ContextFragment],
         entries: list[HistoryEntry],
-    ) -> int:
+        entry_indexes: list[int],
+        tools: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
         """Удаляем старые неприкреплённые элементы, сохраняя недавнюю историю."""
 
-        dropped = 0
+        dropped: list[dict[str, Any]] = []
         messages = render_messages(self.user_task, fragments, entries)
         protected_start = max(len(entries) - self.keep_recent_turns, 0)
-        while entries and messages_chars(messages) > self.max_chars:
+        while (
+            entries
+            and estimate_request_tokens(messages, tools)["request_tokens_estimate"]
+            > self.max_tokens
+        ):
             removable = next(
                 (index for index in range(protected_start) if entries[index]),
                 None,
             )
             if removable is None:
                 break
+            dropped.append(
+                _history_entry_report(entries[removable], entry_indexes[removable])
+            )
             del entries[removable]
-            dropped += 1
+            del entry_indexes[removable]
             protected_start = max(len(entries) - self.keep_recent_turns, 0)
             messages = render_messages(self.user_task, fragments, entries)
         return dropped
+
+
+def _fragment_report(fragment: ContextFragment) -> dict[str, Any]:
+    """Описываем фрагмент контекста без самого текста."""
+
+    return {
+        "id": fragment.id,
+        "source": fragment.source,
+        "placement": fragment.placement,
+        "priority": fragment.priority,
+        "chars": len(fragment.text),
+        "transient": fragment.transient,
+        "empty": not bool(fragment.text.strip()),
+    }
+
+
+def _history_entry_report(entry: HistoryEntry, index: int) -> dict[str, Any]:
+    """Описываем элемент истории так, чтобы трасса не раздувалась контентом."""
+
+    rendered = entry.rendered_messages()
+    return {
+        "index": index,
+        "kind": entry.kind,
+        "messages": len(entry.messages),
+        "rendered_messages": len(rendered),
+        "tokens_estimate": estimate_tokens(rendered),
+        "roles": [str(message.get("role") or "") for message in rendered],
+        "tool_call_ids": sorted(entry.expected_tool_call_ids | entry.seen_tool_call_ids),
+        "pending_followups": len(entry.pending_followups),
+    }
 
 
 def _tool_name(call: dict[str, Any], observation: dict[str, Any]) -> str:

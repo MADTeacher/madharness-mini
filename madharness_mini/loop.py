@@ -24,7 +24,7 @@ def base_context(cfg: Config, task: str) -> ContextManager:
 
     context = ContextManager(
         task,
-        max_chars=int(cfg.data.get("context_max_chars", 120000)),
+        max_tokens=int(cfg.data.get("context_max_tokens", 60000)),
         keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
     )
     system = load_prompt("system")
@@ -81,7 +81,7 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
     trace = Trace(cfg, "ask")
     context = base_context(cfg, task)
     messages = context.messages()
-    trace.write("model_call_started", tools_count=0)
+    trace.write("model_call_started", tools_count=0, context_report=context.report())
     try:
         raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
     except RuntimeError as exc:
@@ -106,11 +106,17 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     tools_registry = ToolRegistry(cfg)
     context = base_context(cfg, task)
     for turn in range(int(cfg.data["max_turns"])):
-        messages = context.messages()
-        trace.write("model_call_started", turn=turn, tools_count=len(tools_registry.tools))
+        tool_schemas = tools_registry.schemas()
+        messages = context.messages(tool_schemas)
+        trace.write(
+            "model_call_started",
+            turn=turn,
+            tools_count=len(tool_schemas),
+            context_report=context.report(),
+        )
         try:
             raw = call_model_with_rate_limit_retry(
-                client, trace, messages, tools_registry.schemas(), turn=turn
+                client, trace, messages, tool_schemas, turn=turn
             )
         except RuntimeError as exc:
             trace.write("model_error", turn=turn, error=str(exc))

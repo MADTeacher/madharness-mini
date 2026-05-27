@@ -1,21 +1,51 @@
-"""Оценка и обрезка контекста по длине JSON-сообщений."""
+"""Оценка токенового бюджета и обрезка больших tool-наблюдений."""
 
 import json
 from typing import Any
 
 from .history import HistoryEntry
 
-
-def messages_chars(messages: list[dict[str, Any]]) -> int:
-    """Оцениваем размер контекста по компактному JSON-представлению."""
-
-    return len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+# Консервативная цена токена без tokenizer конкретной модели.
+TOKEN_ESTIMATE_BYTES_PER_TOKEN = 3
 
 
-def clip_tool_messages(entries: list[HistoryEntry], limit: int) -> bool:
-    """Укорачиваем content у role=tool сообщений перед отправкой модели."""
+def estimate_tokens(payload: Any) -> int:
+    """Оцениваем токены по размеру компактного JSON в UTF-8.
 
-    changed = False
+    Харнесс работает с OpenAI-совместимыми провайдерами, где tokenizer зависит
+    от выбранной модели. Поэтому бюджет намеренно использует один простой
+    приближённый счётчик без runtime-зависимостей.
+    """
+
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return (
+        len(raw) + TOKEN_ESTIMATE_BYTES_PER_TOKEN - 1
+    ) // TOKEN_ESTIMATE_BYTES_PER_TOKEN
+
+
+def estimate_request_tokens(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    """Оцениваем части запроса, которые занимают контекст модели."""
+
+    payload: dict[str, Any] = {"messages": messages}
+    messages_tokens = estimate_tokens(messages)
+    tools_tokens = 0
+    if tools:
+        payload["tools"] = tools
+        tools_tokens = estimate_tokens(tools)
+    return {
+        "messages_tokens_estimate": messages_tokens,
+        "tools_tokens_estimate": tools_tokens,
+        "request_tokens_estimate": estimate_tokens(payload),
+    }
+
+
+def clip_tool_messages(entries: list[HistoryEntry], limit: int) -> list[dict[str, Any]]:
+    """Укорачиваем content у role=tool сообщений и описываем обрезанные места."""
+
+    clipped: list[dict[str, Any]] = []
     for entry in entries:
         for message in entry.messages:
             if message.get("role") != "tool":
@@ -23,9 +53,17 @@ def clip_tool_messages(entries: list[HistoryEntry], limit: int) -> bool:
             content = message.get("content")
             if not isinstance(content, str) or len(content) <= limit:
                 continue
-            message["content"] = clip_tool_content(content, limit)
-            changed = True
-    return changed
+            shortened = clip_tool_content(content, limit)
+            message["content"] = shortened
+            clipped.append(
+                {
+                    "tool_call_id": str(message.get("tool_call_id") or ""),
+                    "before_chars": len(content),
+                    "after_chars": len(shortened),
+                    "saved_chars": len(content) - len(shortened),
+                }
+            )
+    return clipped
 
 
 def clip_tool_content(content: str, limit: int) -> str:

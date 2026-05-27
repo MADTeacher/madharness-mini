@@ -14,7 +14,7 @@ def tool_call(call_id="call_1", name="demo"):
 
 class ContextManagerTests(HarnessTestCase):
     def test_locked_fragments_and_task_survive_small_budget(self):
-        ctx = ContextManager("do the task", max_chars=180, keep_recent_turns=0)
+        ctx = ContextManager("do the task", max_tokens=90, keep_recent_turns=0)
         ctx.add_fragment(
             ContextFragment(
                 id="system",
@@ -37,7 +37,7 @@ class ContextManagerTests(HarnessTestCase):
         self.assertGreater(ctx.stats()["dropped_entries"], 0)
 
     def test_tool_turn_is_removed_atomically(self):
-        ctx = ContextManager("task", max_chars=220, keep_recent_turns=1)
+        ctx = ContextManager("task", max_tokens=100, keep_recent_turns=1)
         ctx.add_fragment(ContextFragment("system", "test", "system"))
         old_call = tool_call("old_call")
         ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_call]})
@@ -59,7 +59,7 @@ class ContextManagerTests(HarnessTestCase):
         self.assertIn("new answer", rendered)
 
     def test_followup_image_is_not_stored_inside_tool_observation(self):
-        ctx = ContextManager("inspect", max_chars=20000)
+        ctx = ContextManager("inspect", max_tokens=20000)
         call = tool_call("image_call", "read_image")
         followup = [
             {
@@ -103,13 +103,79 @@ class ContextManagerTests(HarnessTestCase):
         self.assertIn("data:image/png;base64,abc", json.dumps(image_messages[0]))
 
     def test_stats_reports_context_size_and_truncation(self):
-        ctx = ContextManager("task", max_chars=260, keep_recent_turns=0)
+        ctx = ContextManager("task", max_tokens=100, keep_recent_turns=0)
         ctx.add_fragment(ContextFragment("system", "test", "system"))
         ctx.record_assistant({"role": "assistant", "content": "x" * 1000})
 
         ctx.messages()
         stats = ctx.stats()
+        report = ctx.report()
 
-        self.assertIsInstance(stats["context_chars"], int)
+        self.assertIsInstance(stats["context_tokens_estimate"], int)
         self.assertTrue(stats["truncated"])
         self.assertEqual(stats["history_entries"], 1)
+        self.assertEqual(
+            report["request_tokens_estimate"],
+            stats["context_tokens_estimate"],
+        )
+        self.assertEqual(report["history"]["total_entries"], 1)
+        self.assertEqual(len(report["history"]["dropped_entries"]), 1)
+
+    def test_report_describes_fragments_and_tool_clipping_without_content(self):
+        ctx = ContextManager("task", max_tokens=400, keep_recent_turns=3)
+        ctx.add_fragment(
+            ContextFragment(
+                id="system",
+                source="test-system",
+                text="system rules",
+                priority=0,
+            )
+        )
+        call = tool_call("call_clip", "run_shell")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {
+                "ok": True,
+                "tool": "run_shell",
+                "summary": "ran command",
+                "stdout": "x" * 2000,
+            },
+        )
+
+        ctx.messages()
+        report = ctx.report()
+        rendered = json.dumps(report, ensure_ascii=False)
+
+        self.assertEqual(report["fragments"][0]["id"], "system")
+        self.assertEqual(report["fragments"][0]["chars"], len("system rules"))
+        self.assertEqual(report["history"]["total_entries"], 1)
+        self.assertEqual(report["history"]["rendered_entries"], 1)
+        self.assertEqual(
+            report["history"]["clipped_tool_messages"][0]["tool_call_id"],
+            "call_clip",
+        )
+        self.assertNotIn("x" * 100, rendered)
+
+    def test_report_counts_tool_schemas_in_request_budget(self):
+        ctx = ContextManager("task", max_tokens=40)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "large_tool",
+                    "description": "tool schema " + "x" * 500,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        ctx.messages(tools)
+        report = ctx.report()
+
+        self.assertGreater(report["tools_tokens_estimate"], 0)
+        self.assertGreater(
+            report["request_tokens_estimate"],
+            report["messages_tokens_estimate"],
+        )
+        self.assertTrue(report["over_budget"])

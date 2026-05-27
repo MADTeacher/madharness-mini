@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from madharness_mini.loop import ask, run_agent
 from madharness_mini.model import ModelClient, ModelRateLimitError, parse_retry_after
+from madharness_mini.trace import summarize_trace
 
 from tests.helpers import HarnessTestCase
 
@@ -139,6 +140,28 @@ class ModelLoopTests(HarnessTestCase):
 
         sleep.assert_called_once_with(1)
 
+    def test_ask_writes_context_report_to_trace(self):
+        cfg = self.make_cfg()
+        raw = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", return_value=raw):
+            result, trace_path = ask("hello", cfg)
+
+        self.assertEqual(result, "ok")
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        started = next(event for event in events if event["event"] == "model_call_started")
+        report = started["context_report"]
+        self.assertIsInstance(report["request_tokens_estimate"], int)
+        self.assertEqual(report["tools_tokens_estimate"], 0)
+        self.assertEqual(report["history"]["total_entries"], 0)
+        summary = summarize_trace(cfg, Path(trace_path).stem)
+        self.assertIn("context:", summary)
+        self.assertIn("estimated tokens", summary)
+        self.assertIn("history: 0/0 entries", summary)
+
     def test_run_agent_keeps_image_text_only_when_vision_is_disabled(self):
         cfg = self.make_cfg()
         (cfg.root / "shot.png").write_bytes(PNG_BYTES)
@@ -227,7 +250,7 @@ class ModelLoopTests(HarnessTestCase):
 
     def test_run_agent_trims_large_tool_output_before_next_model_call(self):
         cfg = self.make_cfg()
-        cfg.data["context_max_chars"] = 4500
+        cfg.data["context_max_tokens"] = 1800
         seen_messages = []
         huge_stdout = "x" * 5000
 
