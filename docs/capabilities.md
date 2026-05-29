@@ -41,6 +41,34 @@ Bundled resources (`scripts/`, `references/`, `assets/` и другие файл
 
 Подробно принцип работы навыков описан в документе [Agent Skills в madharness-mini](agent-skills.md).
 
+## MCP tools
+
+В режиме `run` харнесс может подключать tools внешних stdio MCP-серверов. Настройки лежат отдельно от основного конфига:
+
+```text
+.madharness-mini/mcp.json
+```
+
+Если этого файла нет, MCP выключен и набор инструментов остаётся прежним. Минимальный формат:
+
+```json
+{
+  "servers": {
+    "playwright": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "cwd": ".",
+      "timeout_seconds": 30
+    }
+  }
+}
+```
+
+Поддерживается только stdio transport и только MCP tools. После `initialize` харнесс вызывает `tools/list`, превращает каждый MCP tool в обычный `ToolSpec` с именем вида `mcp__playwright__browser_navigate`, а при вызове модели отправляет на сервер `tools/call`.
+
+MCP-сервер запускается как внешний процесс без shell-строки: `command` и `args` не склеиваются. `cwd` обязан оставаться внутри `workspace_root`. Окружение сервера состоит из безопасного минимума системных переменных и явного `env` из `mcp.json`; ключ LLM API и `MADHARNESS_MINI_*` не передаются автоматически.
+
 ## Слой контекста
 
 Перед каждым обращением к модели `madharness-mini` собирает контекст через `ContextManager` из пакета `madharness_mini.context`.
@@ -70,7 +98,7 @@ Bundled resources (`scripts/`, `references/`, `assets/` и другие файл
 
 Подробнее формат патчей описан в документе [Как работает `apply_patch`](apply-patch.md).
 
-Для разработки новых встроенных инструментов используется пакет `madharness_mini.tools`. Handler и `ToolSpec` добавляются в подходящий модуль пакета, а стандартный набор отдаёт `BuiltinToolProvider`. Skills, будущие MCP, субагенты и команды подключаются через дополнительные providers, поэтому внешний источник может добавить инструмент без правки агентского цикла.
+Для разработки новых встроенных инструментов используется пакет `madharness_mini.tools`. Handler и `ToolSpec` добавляются в подходящий модуль пакета, а стандартный набор отдаёт `BuiltinToolProvider`. Skills и MCP подключаются через дополнительные providers, поэтому внешний источник может добавить инструмент без правки агентского цикла.
 
 ## Проектные документы
 
@@ -104,6 +132,8 @@ Bundled resources (`scripts/`, `references/`, `assets/` и другие файл
 | `workspace_root` | Папка, внутри которой агент может работать. |
 | `protected_paths` | Пути, к которым инструменты не должны обращаться. |
 | `allow_shell` | Разрешает или запрещает инструмент `run_shell`. |
+
+MCP не добавляет поле в этот файл. Для MCP используется отдельный `.madharness-mini/mcp.json`.
 
 Настройки можно переопределить через файл `.env` в корне проекта или через переменные окружения:
 
@@ -177,6 +207,8 @@ madharness-mini init \
 обрезано бюджетом.
 
 Для Agent Skills дополнительно пишутся события `skills_discovered`, `skill_activated` и `skill_resource_used`. Трасса не дублирует полный текст активированного `SKILL.md`, чтобы журнал не раздувался и не раскрывал лишний контент.
+
+Для MCP дополнительно пишутся `mcp_server_started`, `mcp_server_error` и `mcp_server_stopped`. В эти события не попадают секреты и полный вывод stderr/stdout.
 
 Краткая сводка открывается командой:
 

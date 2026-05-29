@@ -32,13 +32,17 @@ class ToolRegistry:
         self.context = ToolContext(cfg, self.policy, trace, skill_runtime)
         self.providers = [BuiltinToolProvider(), *list(providers or [])]
         self.tools = {}
-        for provider in self.providers:
-            # получаем список ToolSpec от каждого provider
-            # и регистрируем их в словаре self.tools
-            for tool in provider.specs(self.context):
-                if tool.name in self.tools:
-                    raise RuntimeError(f"duplicate tool name: {tool.name}")
-                self.tools[tool.name] = tool
+        try:
+            for provider in self.providers:
+                # получаем список ToolSpec от каждого provider
+                # и регистрируем их в словаре self.tools
+                for tool in provider.specs(self.context):
+                    if tool.name in self.tools:
+                        raise RuntimeError(f"duplicate tool name: {tool.name}")
+                    self.tools[tool.name] = tool
+        except Exception:
+            self.close()
+            raise
 
     def schemas(self) -> list[dict[str, Any]]:
         """Список схем для поля tools в запросе к модели."""
@@ -55,3 +59,22 @@ class ToolRegistry:
             return tool.handler(self.context, args)
         except Exception as exc:
             return fail(name, f"{type(exc).__name__}: {exc}")
+
+    def close(self) -> None:
+        """Закрываем providers с lifecycle, например MCP subprocess."""
+
+        for provider in self.providers:
+            close = getattr(provider, "close", None)
+            if close is None:
+                continue
+            try:
+                close(self.context.trace)
+            except TypeError:
+                close()
+            except Exception as exc:
+                if self.context.trace:
+                    self.context.trace.write(
+                        "tool_provider_close_error",
+                        provider=type(provider).__name__,
+                        error=str(exc),
+                    )

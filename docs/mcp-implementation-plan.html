@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>План внедрения MCP в madharness-mini</title>
+    <style>
+      :root {
+        --ink: #16202a;
+        --muted: #566574;
+        --line: #d9e0e7;
+        --paper: #f7f8f5;
+        --panel: #ffffff;
+        --blue: #2563a9;
+        --green: #2f7d5c;
+        --red: #b44838;
+        --amber: #b7791f;
+        --violet: #6d5aa7;
+        --teal: #197a85;
+        --shadow: 0 14px 34px rgba(30, 41, 59, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      a {
+        color: var(--blue);
+        text-decoration-thickness: 0.08em;
+        text-underline-offset: 0.2em;
+      }
+
+      code,
+      pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      }
+
+      header {
+        border-bottom: 1px solid var(--line);
+        background: #eef2f1;
+      }
+
+      .wrap {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .hero {
+        min-height: 42vh;
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+        gap: 36px;
+        align-items: center;
+        padding: 54px 0 42px;
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--green);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0;
+        font-size: 0.82rem;
+      }
+
+      h1,
+      h2,
+      h3 {
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.2rem, 5vw, 4.5rem);
+        max-width: 920px;
+      }
+
+      h2 {
+        margin: 0 0 18px;
+        font-size: clamp(1.55rem, 2.7vw, 2.3rem);
+      }
+
+      h3 {
+        margin: 0 0 10px;
+        font-size: 1.08rem;
+      }
+
+      p {
+        margin: 0 0 14px;
+      }
+
+      .lede {
+        max-width: 820px;
+        color: var(--muted);
+        font-size: 1.08rem;
+        margin-top: 20px;
+      }
+
+      .hero-aside {
+        border-left: 4px solid var(--blue);
+        padding: 18px 0 18px 22px;
+      }
+
+      .hero-aside dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 8px 14px;
+        margin: 0;
+      }
+
+      .hero-aside dt {
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .hero-aside dd {
+        margin: 0;
+      }
+
+      main {
+        padding: 34px 0 64px;
+      }
+
+      section {
+        margin: 0 0 42px;
+      }
+
+      .band {
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+      }
+
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .pill-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 18px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 10px;
+        background: #fff;
+        color: var(--muted);
+        font-size: 0.88rem;
+        white-space: nowrap;
+      }
+
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        background: #fbfcfd;
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 1.55rem;
+        line-height: 1;
+      }
+
+      .metric span {
+        color: var(--muted);
+      }
+
+      .map {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        align-items: stretch;
+      }
+
+      .node {
+        position: relative;
+        min-height: 150px;
+        border: 1px solid var(--line);
+        border-top: 5px solid var(--blue);
+        border-radius: 8px;
+        padding: 16px;
+        background: #fff;
+      }
+
+      .node.green {
+        border-top-color: var(--green);
+      }
+
+      .node.amber {
+        border-top-color: var(--amber);
+      }
+
+      .node.violet {
+        border-top-color: var(--violet);
+      }
+
+      .node.teal {
+        border-top-color: var(--teal);
+      }
+
+      .node.red {
+        border-top-color: var(--red);
+      }
+
+      .node p {
+        color: var(--muted);
+        font-size: 0.94rem;
+      }
+
+      .arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr auto 1fr;
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      .flow .node {
+        min-height: 128px;
+      }
+
+      .legend {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .legend-item {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        flex: 0 0 auto;
+        background: var(--blue);
+      }
+
+      .dot.green {
+        background: var(--green);
+      }
+
+      .dot.amber {
+        background: var(--amber);
+      }
+
+      .dot.violet {
+        background: var(--violet);
+      }
+
+      .dot.red {
+        background: var(--red);
+      }
+
+      .timeline {
+        display: grid;
+        gap: 14px;
+        counter-reset: phase;
+      }
+
+      .phase {
+        position: relative;
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr) 170px;
+        gap: 18px;
+        align-items: start;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        background: #fff;
+      }
+
+      .phase::before {
+        counter-increment: phase;
+        content: counter(phase);
+        display: grid;
+        place-items: center;
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        background: var(--ink);
+        color: #fff;
+        font-weight: 800;
+      }
+
+      .phase ul,
+      .checklist,
+      .files,
+      .risks {
+        margin: 0;
+        padding-left: 20px;
+      }
+
+      .phase li,
+      .checklist li,
+      .files li,
+      .risks li {
+        margin: 0 0 8px;
+      }
+
+      .badge {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        border-radius: 8px;
+        padding: 5px 9px;
+        background: #eaf2ff;
+        color: var(--blue);
+        font-weight: 700;
+        font-size: 0.82rem;
+      }
+
+      .badge.green {
+        background: #e8f4ef;
+        color: var(--green);
+      }
+
+      .badge.amber {
+        background: #fff4df;
+        color: #925b13;
+      }
+
+      .badge.red {
+        background: #fdecea;
+        color: var(--red);
+      }
+
+      .file-table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow: hidden;
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      .file-table th,
+      .file-table td {
+        border-bottom: 1px solid var(--line);
+        padding: 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .file-table th {
+        color: var(--muted);
+        font-size: 0.86rem;
+        text-transform: uppercase;
+        letter-spacing: 0;
+        background: #f1f4f6;
+      }
+
+      .file-table tr:last-child td {
+        border-bottom: 0;
+      }
+
+      pre {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        margin: 0;
+        padding: 16px;
+        background: #101820;
+        color: #edf6f9;
+        font-size: 0.9rem;
+      }
+
+      .decision {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+        gap: 18px;
+        align-items: start;
+      }
+
+      .callout {
+        border-left: 4px solid var(--amber);
+        padding: 14px 18px;
+        background: #fffaf0;
+        border-radius: 0 8px 8px 0;
+      }
+
+      .source-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 10px 0 0;
+      }
+
+      .source-list a {
+        display: inline-flex;
+        min-height: 34px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 10px;
+        background: #fff;
+        text-decoration: none;
+      }
+
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 24px 0 34px;
+        color: var(--muted);
+        background: #eef2f1;
+      }
+
+      @media (max-width: 900px) {
+        .hero,
+        .grid-3,
+        .grid-2,
+        .decision,
+        .map,
+        .legend {
+          grid-template-columns: 1fr;
+        }
+
+        .flow {
+          grid-template-columns: 1fr;
+        }
+
+        .arrow {
+          min-height: 20px;
+          transform: rotate(90deg);
+        }
+
+        .phase {
+          grid-template-columns: 48px minmax(0, 1fr);
+        }
+
+        .phase .badge {
+          grid-column: 2;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .wrap {
+          width: min(100% - 22px, 1180px);
+        }
+
+        .band {
+          padding: 18px;
+        }
+
+        .hero {
+          padding: 38px 0 30px;
+        }
+
+        .file-table {
+          display: block;
+          overflow-x: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap hero">
+        <div>
+          <p class="eyebrow">madharness-mini · MCP V1</p>
+          <h1>План поддержки MCP без внешних runtime-зависимостей</h1>
+          <p class="lede">
+            Карта показывает, как аккуратно встроить stdio MCP-серверы в текущую архитектуру:
+            через существующий <code>ToolProvider</code>, текущий <code>ToolRegistry</code>,
+            единый формат observations и уже работающие трассы.
+          </p>
+          <div class="pill-row" aria-label="Ключевые ограничения">
+            <span class="pill">stdio transport</span>
+            <span class="pill">tools only</span>
+            <span class="pill">Python stdlib</span>
+            <span class="pill">JSON-RPC 2.0</span>
+            <span class="pill">no SDK</span>
+          </div>
+        </div>
+        <aside class="hero-aside" aria-label="Сводка">
+          <dl>
+            <dt>Дата</dt>
+            <dd>29 мая 2026</dd>
+            <dt>Спецификация</dt>
+            <dd>MCP <code>2025-11-25</code>, latest</dd>
+            <dt>Главная цель</dt>
+            <dd>MCP tools выглядят для модели как обычные tools харнесса.</dd>
+            <dt>Главный риск</dt>
+            <dd>Запуск внешнего процесса требует явного конфига и строгого lifecycle.</dd>
+          </dl>
+        </aside>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="grid grid-3" aria-label="Сводные метрики плана">
+        <div class="metric">
+          <strong>6</strong>
+          <span>новых модулей в <code>madharness_mini/mcp/</code></span>
+        </div>
+        <div class="metric">
+          <strong>5</strong>
+          <span>существующих точек интеграции в ядре</span>
+        </div>
+        <div class="metric">
+          <strong>8+</strong>
+          <span>новых тестов для протокола, транспорта и run lifecycle</span>
+        </div>
+      </section>
+
+      <section class="band">
+        <h2>Архитектурная карта</h2>
+        <p>
+          MCP не должен становиться отдельным агентским циклом. Он добавляет внешний источник инструментов,
+          а дальше пользуется тем же путём, что и встроенные tools и Agent Skills.
+        </p>
+
+        <div class="flow" aria-label="Поток MCP tool">
+          <article class="node green">
+            <h3>MCP server</h3>
+            <p>Локальный процесс из <code>.madharness-mini/mcp.json</code>: получает JSON-RPC по stdin, отвечает по stdout.</p>
+          </article>
+          <div class="arrow">→</div>
+          <article class="node teal">
+            <h3><code>mcp/stdio.py</code></h3>
+            <p>Запускает subprocess, делает <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>, закрывает процесс.</p>
+          </article>
+          <div class="arrow">→</div>
+          <article class="node violet">
+            <h3><code>McpToolProvider</code></h3>
+            <p>Преобразует MCP tools в <code>ToolSpec</code> с безопасным префиксом имени.</p>
+          </article>
+        </div>
+
+        <div class="flow" style="margin-top: 12px" aria-label="Путь вызова модели">
+          <article class="node amber">
+            <h3><code>ToolRegistry</code></h3>
+            <p>Регистрирует MCP specs рядом со встроенными tools и вызывает handler по имени.</p>
+          </article>
+          <div class="arrow">→</div>
+          <article class="node">
+            <h3><code>ModelClient</code></h3>
+            <p>Отправляет модели обычные OpenAI-compatible function schemas.</p>
+          </article>
+          <div class="arrow">→</div>
+          <article class="node red">
+            <h3>Observation</h3>
+            <p><code>tools/call</code> возвращается в формат <code>ok()</code> или <code>fail()</code> и уходит в историю контекста.</p>
+          </article>
+        </div>
+
+        <div class="legend">
+          <span class="legend-item"><span class="dot green"></span>внешний процесс</span>
+          <span class="legend-item"><span class="dot"></span>существующее ядро</span>
+          <span class="legend-item"><span class="dot violet"></span>новый adapter</span>
+          <span class="legend-item"><span class="dot amber"></span>registry lifecycle</span>
+          <span class="legend-item"><span class="dot red"></span>ошибки и safety</span>
+        </div>
+      </section>
+
+      <section class="band">
+        <h2>Карта файлов</h2>
+        <table class="file-table">
+          <thead>
+            <tr>
+              <th>Файл</th>
+              <th>Тип изменения</th>
+              <th>Зачем</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>madharness_mini/mcp/__init__.py</code></td>
+              <td><span class="badge green">новый</span></td>
+              <td>Маленький публичный экспорт MCP-пакета.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/mcp/protocol.py</code></td>
+              <td><span class="badge green">новый</span></td>
+              <td>JSON-RPC request, notification, response validation, id, protocol errors.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/mcp/stdio.py</code></td>
+              <td><span class="badge green">новый</span></td>
+              <td>Subprocess transport: newline-delimited JSON-RPC, stdout/stderr readers, timeout, shutdown.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/mcp/config.py</code></td>
+              <td><span class="badge green">новый</span></td>
+              <td>Читает и валидирует <code>.madharness-mini/mcp.json</code>; отсутствие файла означает, что MCP выключен.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/mcp/provider.py</code></td>
+              <td><span class="badge green">новый</span></td>
+              <td>Получает описания MCP-серверов, запускает clients, отдаёт префиксованные <code>ToolSpec</code>.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/mcp/results.py</code></td>
+              <td><span class="badge green">новый</span></td>
+              <td>Преобразует MCP content в observation, обрезает большие строки, обрабатывает <code>isError</code>.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/config.py</code> и <code>utils.py</code></td>
+              <td><span class="badge green">не трогать</span></td>
+              <td>MCP-конфиг живёт отдельно в <code>.madharness-mini/mcp.json</code>; основной <code>Config</code> и defaults не меняются.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/policy.py</code></td>
+              <td><span class="badge amber">изменить</span></td>
+              <td>Переиспользовать <code>safe_path()</code> для <code>cwd</code> MCP-сервера и явно описать границу workspace.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/tools/registry.py</code></td>
+              <td><span class="badge amber">изменить</span></td>
+              <td>Добавить <code>close()</code>, который закрывает providers с lifecycle.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/loop.py</code></td>
+              <td><span class="badge amber">изменить</span></td>
+              <td>Подключить MCP providers в <code>run_agent()</code> и закрывать registry в <code>finally</code>.</td>
+            </tr>
+            <tr>
+              <td><code>madharness_mini/trace.py</code></td>
+              <td><span class="badge amber">изменить</span></td>
+              <td>Использовать текущий writer для событий <code>mcp_server_started</code>, <code>mcp_server_error</code>, <code>mcp_server_stopped</code>.</td>
+            </tr>
+            <tr>
+              <td><code>tests/test_mcp.py</code> или тематические <code>tests/test_*.py</code></td>
+              <td><span class="badge green">новый/изменить</span></td>
+              <td>Покрыть JSON-RPC, fake stdio server, provider, conversion, shutdown и unsafe cwd.</td>
+            </tr>
+            <tr>
+              <td><code>docs/capabilities.md</code>, <code>docs/code-overview.md</code>, <code>README.md</code></td>
+              <td><span class="badge amber">изменить</span></td>
+              <td>Обновить пользовательскую документацию после реализации V1.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="band">
+        <h2>План внедрения</h2>
+        <div class="timeline">
+          <article class="phase">
+            <div>
+              <h3>Протокольное ядро</h3>
+              <ul>
+                <li>Ввести константу <code>MCP_PROTOCOL_VERSION = "2025-11-25"</code>.</li>
+                <li>Собрать helpers для request, notification и response parsing.</li>
+                <li>На ошибочный JSON-RPC response поднимать понятный <code>RuntimeError</code>.</li>
+              </ul>
+            </div>
+            <span class="badge green">низкий риск</span>
+          </article>
+
+          <article class="phase">
+            <div>
+              <h3>Stdio transport</h3>
+              <ul>
+                <li>Запускать сервер через <code>subprocess.Popen([...], shell=False)</code>.</li>
+                <li>Читать stdout и stderr раздельно, stdout считать только protocol channel.</li>
+                <li>Поддержать timeout на initialize, list и call.</li>
+              </ul>
+            </div>
+            <span class="badge amber">процессы</span>
+          </article>
+
+          <article class="phase">
+            <div>
+              <h3>Конфиг и safety</h3>
+              <ul>
+                <li>Читать MCP-настройки из <code>.madharness-mini/mcp.json</code>; если файла нет, MCP выключен.</li>
+                <li>Принимать только явно включённые серверы: <code>enabled: true</code>.</li>
+                <li>Проверять <code>cwd</code> через workspace policy и не передавать модельный <code>api_key</code> в env сервера.</li>
+              </ul>
+            </div>
+            <span class="badge red">важно</span>
+          </article>
+
+          <article class="phase">
+            <div>
+              <h3>Tool adapter</h3>
+              <ul>
+                <li>Сделать <code>McpToolProvider.specs(ctx)</code>.</li>
+                <li>Префиксовать имена как <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>.</li>
+                <li>Хранить исходное имя MCP tool внутри handler для <code>tools/call</code>.</li>
+              </ul>
+            </div>
+            <span class="badge green">ядро готово</span>
+          </article>
+
+          <article class="phase">
+            <div>
+              <h3>Result conversion</h3>
+              <ul>
+                <li>Текстовые content items объединять в <code>content</code>.</li>
+                <li>Image, audio, resource и resource links возвращать как metadata без base64 payload.</li>
+                <li><code>isError: true</code> превращать в <code>fail()</code>, даже если JSON-RPC response успешен.</li>
+              </ul>
+            </div>
+            <span class="badge amber">контекст</span>
+          </article>
+
+          <article class="phase">
+            <div>
+              <h3>Lifecycle в run</h3>
+              <ul>
+                <li>Создавать MCP providers перед <code>ToolRegistry</code>.</li>
+                <li>Добавить <code>ToolRegistry.close()</code>.</li>
+                <li>Обернуть агентский цикл в <code>try/finally</code>, чтобы процессы закрывались при финале и при ошибках.</li>
+              </ul>
+            </div>
+            <span class="badge red">обязателен</span>
+          </article>
+
+          <article class="phase">
+            <div>
+              <h3>Trace, docs, regression</h3>
+              <ul>
+                <li>Писать короткие MCP события без секретов и без полного stderr/stdout.</li>
+                <li>Добавить fake MCP server в tests для lifecycle и tool calls.</li>
+                <li>Обновить документацию и прогнать <code>uv run -m unittest discover -s tests</code>.</li>
+              </ul>
+            </div>
+            <span class="badge green">закрытие V1</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="grid grid-2">
+        <div class="band">
+          <h2>Конфиг V1</h2>
+          <p>
+            Формат живёт в отдельном файле <code>.madharness-mini/mcp.json</code>.
+            Если файла нет, MCP полностью выключен без изменений в defaults.
+            Команда и аргументы разделены, чтобы не строить shell-строку и не расширять текущую shell-политику.
+          </p>
+          <pre><code>{
+  "servers": {
+    "demo": {
+      "enabled": true,
+      "command": "python3",
+      "args": ["scripts/demo_mcp_server.py"],
+      "cwd": ".",
+      "env": {
+        "DEMO_MODE": "1"
+      },
+      "timeout_seconds": 20
+    }
+  }
+}</code></pre>
+        </div>
+
+        <div class="band">
+          <h2>Минимальный JSON-RPC путь</h2>
+          <p>
+            V1 поддерживает только три рабочие операции после запуска процесса:
+            инициализация, список инструментов и вызов конкретного инструмента.
+          </p>
+          <ul class="checklist">
+            <li><code>initialize</code>: версия протокола, capabilities клиента, clientInfo.</li>
+            <li><code>notifications/initialized</code>: переход в нормальную работу.</li>
+            <li><code>tools/list</code>: получение <code>name</code>, <code>description</code>, <code>inputSchema</code>.</li>
+            <li><code>tools/call</code>: отправка исходного имени tool и arguments.</li>
+            <li>Shutdown: close stdin, wait, terminate, kill при зависании.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="band">
+        <h2>Тестовая сетка</h2>
+        <div class="map">
+          <article class="node green">
+            <h3>Protocol</h3>
+            <p><code>test_jsonrpc_request_has_incrementing_id</code></p>
+            <p><code>test_jsonrpc_error_raises_runtime_error</code></p>
+          </article>
+          <article class="node teal">
+            <h3>Transport</h3>
+            <p><code>test_stdio_client_initialize_and_list_tools</code></p>
+            <p><code>test_stdio_client_times_out_cleanly</code></p>
+          </article>
+          <article class="node violet">
+            <h3>Provider</h3>
+            <p><code>test_mcp_provider_exports_toolspecs</code></p>
+            <p><code>test_mcp_tool_name_collision_is_prefixed</code></p>
+          </article>
+          <article class="node amber">
+            <h3>Observations</h3>
+            <p><code>test_mcp_tool_call_returns_ok_observation</code></p>
+            <p><code>test_mcp_tool_call_iserror_returns_fail</code></p>
+          </article>
+          <article class="node red">
+            <h3>Safety</h3>
+            <p><code>test_mcp_config_rejects_unsafe_cwd</code></p>
+            <p><code>test_mcp_env_does_not_inherit_api_key</code></p>
+          </article>
+          <article class="node">
+            <h3>Lifecycle</h3>
+            <p><code>test_mcp_process_is_closed_after_run</code></p>
+            <p><code>test_registry_close_calls_provider_close</code></p>
+          </article>
+          <article class="node green">
+            <h3>Regression</h3>
+            <p>Старые проекты без <code>.madharness-mini/mcp.json</code> получают прежний набор tools.</p>
+          </article>
+          <article class="node teal">
+            <h3>Docs</h3>
+            <p>Проверить, что README и capabilities не обещают HTTP/resources/prompts в V1.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="decision">
+        <div class="band">
+          <h2>Границы V1</h2>
+          <ul class="files">
+            <li>Не добавлять официальный MCP SDK.</li>
+            <li>Не добавлять runtime-зависимости в <code>pyproject.toml</code>.</li>
+            <li>Не поддерживать Streamable HTTP в первой версии.</li>
+            <li>Не поддерживать resources, prompts, sampling, roots, elicitation, progress и tasks.</li>
+            <li>Не делать auto-discovery серверов вне явного конфига.</li>
+          </ul>
+        </div>
+
+        <div class="band">
+          <h2>Открытые решения</h2>
+          <ul class="risks">
+            <li>Нужна ли allowlist команд MCP-серверов сверх явного <code>enabled: true</code>?</li>
+            <li>Должен ли <code>env</code> наследовать минимальный системный PATH или быть полностью явным?</li>
+            <li>Принимать ли совместимые старые версии протокола или строго только <code>2025-11-25</code>?</li>
+            <li>Как показать пользователю warning перед первым запуском MCP-сервера: документацией, trace-событием или CLI-подтверждением?</li>
+          </ul>
+          <div class="callout">
+            <strong>Рекомендуемое начальное решение:</strong>
+            strict version, явный конфиг, <code>shell=False</code>, workspace-relative <code>cwd</code>,
+            env без модельного <code>api_key</code>, короткая диагностика stderr только в trace.
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <h2>Критерии готовности</h2>
+        <div class="grid grid-2">
+          <ul class="checklist">
+            <li>Один stdio MCP-сервер отдаёт tools через <code>tools/list</code>.</li>
+            <li>Модель видит MCP tools в общем списке schemas.</li>
+            <li>Вызов <code>mcp__server__tool</code> проходит через <code>ToolRegistry.call()</code>.</li>
+            <li>Ответ MCP tool превращается в обычный observation.</li>
+          </ul>
+          <ul class="checklist">
+            <li>Процесс MCP-сервера закрывается после <code>run_agent()</code> при успехе и ошибке.</li>
+            <li>Старые проекты без <code>.madharness-mini/mcp.json</code> работают без изменений.</li>
+            <li>В trace видны старт, сбой и остановка MCP-сервера без секретов.</li>
+            <li>Полный unittest suite проходит.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="band">
+        <h2>Источники и локальные опоры</h2>
+        <p>
+          План сверён с текущим кодом проекта и latest-страницами спецификации MCP.
+          Локальная текстовая основа уже есть в <code>docs/mcp-roadmap.md</code>.
+        </p>
+        <div class="source-list">
+          <a href="mcp-roadmap.md">Локальная дорожная карта</a>
+          <a href="https://modelcontextprotocol.io/specification/2025-11-25">MCP specification 2025-11-25</a>
+          <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle">Lifecycle</a>
+          <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/transports">Transports</a>
+          <a href="https://modelcontextprotocol.io/specification/2025-11-25/server/tools">Tools</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <p>
+          Следующий практический шаг: начать с <code>madharness_mini/mcp/protocol.py</code>
+          и тестов JSON-RPC, затем перейти к fake stdio server.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

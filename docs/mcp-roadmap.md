@@ -38,6 +38,7 @@ V1 поддерживает только stdio transport и только tools.
 madharness_mini/
   mcp/
     __init__.py
+    config.py
     protocol.py
     stdio.py
     provider.py
@@ -48,6 +49,7 @@ madharness_mini/
 
 | Файл | Роль |
 | --- | --- |
+| `config.py` | Читает `.madharness-mini/mcp.json` и валидирует включённые серверы. |
 | `protocol.py` | JSON-RPC 2.0 request/response, id, ошибки, валидация формы. |
 | `stdio.py` | Запуск subprocess, обмен JSON-сообщениями по stdin/stdout, timeout, закрытие. |
 | `provider.py` | `McpToolProvider`, который превращает MCP tools в `ToolSpec`. |
@@ -63,11 +65,13 @@ registry = ToolRegistry(cfg, providers=mcp_providers)
 
 ## Конфиг
 
-Предлагаемый формат в `.madharness-mini/config.json`:
+MCP-настройки читаются из отдельного файла `.madharness-mini/mcp.json`.
+Основной `Config`, defaults и `.madharness-mini/config.json` не меняются.
+Если файла `mcp.json` нет, MCP считается выключенным.
 
 ```json
 {
-  "mcp_servers": {
+  "servers": {
     "demo": {
       "enabled": true,
       "command": "python3",
@@ -98,7 +102,7 @@ MCP-сервер - это исполняемый процесс. Поэтому 
 
 Правила V1:
 
-- Серверы запускаются только из `mcp_servers` в конфиге.
+- Серверы запускаются только из `.madharness-mini/mcp.json`.
 - `enabled` должен быть `true`.
 - `cwd` проходит через `Policy.safe_path()`.
 - `command` не выполняется через shell.
@@ -287,9 +291,9 @@ V1 поддерживает текстовые результаты:
 
 ## Закрытие процессов
 
-Текущий `ToolRegistry` не имеет lifecycle. Для MCP нужно добавить одно из двух:
-
-Вариант A:
+Для MCP выбран явный lifecycle у `ToolRegistry`: метод `close()` вызывает
+`close()` у providers, если он у них есть. `run_agent()` закрывает registry через
+`finally`, поэтому stdio-процесс завершается и при финальном ответе, и при ошибке.
 
 ```python
 registry = ToolRegistry(cfg, providers=mcp_providers)
@@ -298,15 +302,6 @@ try:
 finally:
     registry.close()
 ```
-
-Вариант B:
-
-```python
-with ToolRegistry(cfg, providers=mcp_providers) as registry:
-    ...
-```
-
-Для учебного проекта проще вариант A: один явный метод `close()` вызывает `close()` у providers, если он у них есть.
 
 `McpToolProvider.close()` должен:
 
@@ -350,7 +345,7 @@ Fake server можно сделать маленьким Python-скриптом
 
 1. Добавить `madharness_mini/mcp/protocol.py` и unit-тесты без subprocess.
 2. Добавить `stdio.py` с fake server тестом.
-3. Добавить config parser для `mcp_servers`.
+3. Добавить parser для `.madharness-mini/mcp.json`.
 4. Добавить `McpToolProvider`.
 5. Добавить result conversion в `results.py`.
 6. Добавить `ToolRegistry.close()`.
@@ -366,5 +361,5 @@ V1 считается готовой, когда:
 - Модель может вызвать MCP tool через текущий `ToolRegistry`.
 - Процесс MCP-сервера закрывается после `run`.
 - MCP не добавляет зависимостей в `pyproject.toml`.
-- Старые проекты без `mcp_servers` работают как раньше.
+- Старые проекты без `.madharness-mini/mcp.json` работают как раньше.
 - Ошибки MCP видны в trace и не ломают формат observations.

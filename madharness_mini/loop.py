@@ -8,6 +8,7 @@ from .config import Config
 from .context import ContextFragment, ContextManager, ContextProvider
 from .instructions import load_project_instructions, load_prompt
 from .model import ModelClient, ModelRateLimitError
+from .mcp import McpToolProvider
 from .skills import (
     SkillCatalogProvider,
     SkillRuntime,
@@ -140,6 +141,7 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     else:
         context_providers.append(SkillCatalogProvider(skill_index, cfg.root))
         tool_providers.append(SkillToolProvider(skill_runtime))
+    tool_providers.append(McpToolProvider())
 
     tools_registry = ToolRegistry(
         cfg,
@@ -147,54 +149,57 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
         trace=trace,
         skill_runtime=skill_runtime,
     )
-    context = base_context(cfg, task, providers=context_providers)
-    for name in explicit_skills.names:
-        obs = skill_runtime.activate(name, "explicit")
-        if not obs.get("ok"):
-            result = f"error: {obs.get('summary')}"
-            trace.write("session_end", result=result)
-            raise RuntimeError(str(obs.get("summary")))
-        _apply_hidden_observation_effects(context, trace, obs)
-
-    for turn in range(int(cfg.data["max_turns"])):
-        tool_schemas = tools_registry.schemas()
-        messages = context.messages(tool_schemas)
-        trace.write(
-            "model_call_started",
-            turn=turn,
-            tools_count=len(tool_schemas),
-            context_report=context.report(),
-        )
-        try:
-            raw = call_model_with_rate_limit_retry(
-                client, trace, messages, tool_schemas, turn=turn
-            )
-        except RuntimeError as exc:
-            trace.write("model_error", turn=turn, error=str(exc))
-            trace.write("session_end", result=f"error: {exc}")
-            raise
-        message = raw["choices"][0]["message"]
-        trace.write("model_call_finished", turn=turn, message=message)
-        context.record_assistant(message)
-        calls = message.get("tool_calls") or []
-        if not calls:
-            result = message.get("content") or ""
-            trace.write("session_end", result=result)
-            return result, trace.path
-        for call in calls:
-            try:
-                name, args = parse_tool_args(call)
-                obs = tools_registry.call(name, args)
-            except Exception as exc:
-                name, args = "tool_call", {}
-                obs = fail(name, f"invalid tool call: {exc}")
-            followup_messages = obs.pop("_followup_messages", [])
+    try:
+        context = base_context(cfg, task, providers=context_providers)
+        for name in explicit_skills.names:
+            obs = skill_runtime.activate(name, "explicit")
+            if not obs.get("ok"):
+                result = f"error: {obs.get('summary')}"
+                trace.write("session_end", result=result)
+                raise RuntimeError(str(obs.get("summary")))
             _apply_hidden_observation_effects(context, trace, obs)
-            trace.write("tool_observation", tool=name, args=args, observation=obs)
-            context.record_tool_result(call, obs, followup_messages)
-    result = "Agent stopped: max_turns exceeded."
-    trace.write("session_end", result=result)
-    return result, trace.path
+
+        for turn in range(int(cfg.data["max_turns"])):
+            tool_schemas = tools_registry.schemas()
+            messages = context.messages(tool_schemas)
+            trace.write(
+                "model_call_started",
+                turn=turn,
+                tools_count=len(tool_schemas),
+                context_report=context.report(),
+            )
+            try:
+                raw = call_model_with_rate_limit_retry(
+                    client, trace, messages, tool_schemas, turn=turn
+                )
+            except RuntimeError as exc:
+                trace.write("model_error", turn=turn, error=str(exc))
+                trace.write("session_end", result=f"error: {exc}")
+                raise
+            message = raw["choices"][0]["message"]
+            trace.write("model_call_finished", turn=turn, message=message)
+            context.record_assistant(message)
+            calls = message.get("tool_calls") or []
+            if not calls:
+                result = message.get("content") or ""
+                trace.write("session_end", result=result)
+                return result, trace.path
+            for call in calls:
+                try:
+                    name, args = parse_tool_args(call)
+                    obs = tools_registry.call(name, args)
+                except Exception as exc:
+                    name, args = "tool_call", {}
+                    obs = fail(name, f"invalid tool call: {exc}")
+                followup_messages = obs.pop("_followup_messages", [])
+                _apply_hidden_observation_effects(context, trace, obs)
+                trace.write("tool_observation", tool=name, args=args, observation=obs)
+                context.record_tool_result(call, obs, followup_messages)
+        result = "Agent stopped: max_turns exceeded."
+        trace.write("session_end", result=result)
+        return result, trace.path
+    finally:
+        tools_registry.close()
 
 
 def _apply_hidden_observation_effects(
