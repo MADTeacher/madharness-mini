@@ -60,6 +60,9 @@ def read_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 def write_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """Полностью перезаписываем файл в workspace; каталоги создаём сами."""
 
+    scope_error = ctx.write_path_error(args["path"])
+    if scope_error:
+        return fail("write_file", scope_error)
     path, err = ctx.policy.safe_path(args["path"])
     if err or not path:
         return fail("write_file", err or f"invalid path: {args['path']}")

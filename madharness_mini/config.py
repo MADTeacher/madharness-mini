@@ -7,6 +7,7 @@ from pathlib import Path
 from .utils import DEFAULT_CONFIG, STATE_DIR
 
 IMAGE_DETAIL_VALUES = {"auto", "low", "high", "original"}
+ORCHESTRATION_MODE_VALUES = {"off", "requested", "auto", "required"}
 
 
 class Config:
@@ -90,6 +91,19 @@ class Config:
             key = f"MADHARNESS_MINI_{field.upper()}"
             if env.get(key):
                 self.data[field] = env[key]
+        if env.get("MADHARNESS_MINI_ORCHESTRATION_ENABLED"):
+            self.data["orchestration_enabled"] = parse_bool_env(
+                "MADHARNESS_MINI_ORCHESTRATION_ENABLED",
+                env["MADHARNESS_MINI_ORCHESTRATION_ENABLED"],
+            )
+        if env.get("MADHARNESS_MINI_ORCHESTRATION_MODE"):
+            mode = env["MADHARNESS_MINI_ORCHESTRATION_MODE"].strip().lower()
+            if mode not in ORCHESTRATION_MODE_VALUES:
+                allowed = ", ".join(sorted(ORCHESTRATION_MODE_VALUES))
+                raise RuntimeError(
+                    f"invalid MADHARNESS_MINI_ORCHESTRATION_MODE: {mode}; allowed: {allowed}"
+                )
+            self.data["orchestration_mode"] = mode
         if env.get("MADHARNESS_MINI_SUPPORTS_IMAGE_INPUT"):
             self.data["supports_image_input"] = parse_bool_env(
                 "MADHARNESS_MINI_SUPPORTS_IMAGE_INPUT",

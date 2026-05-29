@@ -1,0 +1,234 @@
+# Субагенты
+
+Субагенты позволяют ведущему агенту делегировать часть работы отдельной роли: исследователю, планировщику, реализатору, ревьюеру или пользовательскому исполнителю из проекта. Для пользователя это остаётся обычным режимом `run`, но доступность `delegate_task` зависит от режима оркестрации. В обычном `auto` модель видит `delegate_task` и сама решает, нужен ли субагент; в `off` делегация недоступна; в `required` ведущий агент становится координатором и должен поручать правки подходящим ролям.
+
+Субагент запускается в том же процессе, но получает отдельный контекст, свой системный prompt, свой список доступных tools и свой JSONL trace. История ведущего агента не копируется целиком; в делегацию попадают только задача и короткий `context`, который ведущий агент передал в `delegate_task`.
+
+## Встроенные роли
+
+Встроенные субагенты лежат в пакете:
+
+```text
+madharness_mini/prompts/subagents
+```
+
+Каждая роль описана обычным markdown-файлом с YAML frontmatter. Python-код не хранит prompts в словарях, поэтому поведение ролей можно читать и менять как учебный текст.
+
+| Роль | Профиль | Tools | Для чего нужна |
+| --- | --- | --- | --- |
+| `researcher` | `read-only` | `list_files`, `read_file`, `search_code` | Найти факты в проекте перед планированием или правкой. |
+| `planner` | `writable` | `list_files`, `read_file`, `search_code`, `apply_patch`, `write_file`, `ask_user` | Вести markdown-файл плана, разобрать неоднозначную задачу и при необходимости напрямую спросить пользователя. |
+| `implementer` | `writable` | `list_files`, `read_file`, `search_code`, `apply_patch`, `write_file`, `run_shell` | Внести кодовые изменения и запустить безопасную проверку. |
+| `reviewer` | `read-only` | `list_files`, `read_file`, `search_code` | Проверить изменение или план на баги, регрессии и тестовые пробелы. |
+
+## Пользовательские субагенты
+
+Проект может добавить собственных субагентов без изменения кода `madharness-mini`. Для этого создайте файл:
+
+```text
+.madharness-mini/subagents/<name>.md
+```
+
+Минимальный пример:
+
+```yaml
+---
+name: test-writer
+description: Пишет минимальные unittest для изменённого кода.
+profile: writable
+tools: ["list_files", "read_file", "search_code", "apply_patch", "write_file", "run_shell", "ask_user"]
+max_turns: 10
+context_max_tokens: 30000
+---
+
+Ты субагент test-writer.
+
+Твоя задача — писать маленькие unittest рядом с существующими тестами.
+Сначала найди похожие тесты, затем добавь минимальную проверку.
+Финальный ответ должен перечислить изменённые файлы и команду проверки.
+```
+
+Имя файла не обязано совпадать с `name`, но лучше держать их одинаковыми, чтобы каталог читался без сюрпризов. Имя в frontmatter должно быть коротким slug: строчные латинские буквы, цифры и дефисы.
+
+Если пользовательский файл использует имя встроенной роли, он перекрывает её только при явном поле:
+
+```yaml
+override: true
+```
+
+Без `override: true` встроенная роль остаётся активной, а `subagents validate` покажет warning. Это защищает проект от случайной коллизии имён.
+
+## Поля frontmatter
+
+| Поле | Обязательное | Смысл |
+| --- | --- | --- |
+| `name` | да | Имя субагента, которое передаётся в `delegate_task`. |
+| `description` | да | Короткое описание для ведущего агента и CLI. |
+| `profile` | да | `read-only` или `writable`. |
+| `tools` | да | JSON-style список строк, например `["read_file", "search_code"]`. |
+| `max_turns` | нет | Лимит ходов конкретного субагента. Если не задан, берётся `subagent_max_turns`. |
+| `context_max_tokens` | нет | Контекстный бюджет конкретного субагента. Если не задан, берётся `subagent_context_max_tokens`. |
+| `override` | нет | Разрешает project-local файлу перекрыть встроенную роль с тем же именем. |
+| `metadata` | нет | Одноуровневый словарь строк для заметок проекта. |
+
+Важно: поле `tools` пишется именно как список строк в JSON-стиле:
+
+```yaml
+tools: ["list_files", "read_file", "search_code"]
+```
+
+Формат вроде `tools: list_files read_file search_code` считается ошибкой. Субагент также не может получить `delegate_task`: рекурсивная делегация намеренно запрещена, чтобы минимальный харнесс оставался понятным.
+
+## Profiles и tools
+
+`profile` описывает общий уровень доверия роли, но сам по себе не выдаёт инструменты. Фактические полномочия всегда задаёт список `tools`.
+
+`read-only` обычно получает только чтение и поиск: `list_files`, `read_file`, `search_code`. Такой субагент подходит для исследования и ревью.
+
+`writable` может получить `apply_patch`, `write_file` и, если это нужно роли, `run_shell`. Для встроенного `planner` действует дополнительный write scope: он может создавать и менять только markdown-файлы (`.md`) с составляемым планом. Попытка записать `index.html`, `.py`, `.js`, `.json` или другой не-markdown файл вернёт ошибку инструмента.
+
+Нормальный результат planner — markdown-план, решение, вопросы и `next_steps` для implementer. Полноценную реализацию должен делать `implementer` или ведущий агент.
+
+Ведущий агент может попросить writable-субагента запуститься как `read-only`. Такой downgrade убирает потенциально пишущие tools: `apply_patch`, `write_file`, `run_shell`. Обратный upgrade запрещён: `read-only` роль нельзя сделать writable через аргументы `delegate_task`.
+
+## `ask_user`
+
+`ask_user` доступен только внутри субагента, если имя инструмента указано в `tools`. Он не читает stdin и не открывает интерактивный prompt. Вместо этого субагент завершает текущую делегацию со статусом `needs_user_input`, а основной `run` сразу завершается прямым вопросом пользователю.
+
+Так вопрос остаётся видимым в trace, а планировочный режим не превращается в молчаливое гадание ведущей модели.
+
+Пример ожидаемого поведения:
+
+```text
+planner -> ask_user(question="Какой API оставить публичным?", options=["A", "B"])
+delegate_task -> status: needs_user_input
+madharness-mini run -> печатает вопрос пользователю и завершает текущий запуск
+```
+
+## Делегация
+
+В режиме `run` ведущий агент видит tool `delegate_task`, если текущий режим оркестрации это разрешает.
+
+Аргументы:
+
+| Поле | Смысл |
+| --- | --- |
+| `subagent` | Имя встроенной или project-local роли. |
+| `task` | Маленькая самодостаточная задача для субагента. |
+| `context` | Короткий родительский контекст: ограничения, решения, файлы, которые уже известны. |
+| `profile` | Необязательный запрос `read-only` или `writable`; используется только для безопасного downgrade. |
+
+Observation `delegate_task` содержит:
+
+| Поле | Смысл |
+| --- | --- |
+| `status` | `done`, `needs_user_input` или ошибка. |
+| `answer` | Финальный ответ субагента, если он завершился успешно. |
+| `question` | Вопрос для пользователя, если статус `needs_user_input`. |
+| `changed_files` | Пути, которые субагент изменил через `write_file` или `apply_patch`. |
+| `trace_summary` | Краткая сводка дочерней трассы. |
+| `subagent_trace_id` | Идентификатор локального trace субагента. |
+| `subagent_trace_path` | Путь к локальному trace относительно рабочей папки, если это возможно. |
+
+## Трассы
+
+Родительский запуск пишет события:
+
+```text
+subagents_discovered
+subagent_started
+subagent_finished
+subagent_failed
+user_input_requested
+```
+
+Полный ход субагента пишется в отдельный файл:
+
+```text
+.madharness-mini/traces/<parent-id>--subagent-<name>-<suffix>.jsonl
+```
+
+В дочернем trace видны его собственные `model_call_started`, `model_call_finished`, `tool_observation`, `context_report` и `session_end`. Родительская трасса хранит только ссылку и краткую сводку, чтобы основной журнал не раздувался.
+
+Команда `trace` показывает наличие subagent-событий:
+
+```bash
+madharness-mini trace <trace-id>
+```
+
+## CLI
+
+Посмотреть доступные роли:
+
+```bash
+madharness-mini subagents list
+```
+
+Показать конкретную роль вместе с prompt:
+
+```bash
+madharness-mini subagents show planner
+```
+
+Проверить frontmatter, коллизии и ошибки формата:
+
+```bash
+madharness-mini subagents validate
+```
+
+Типичные ошибки:
+
+| Сообщение | Что исправить |
+| --- | --- |
+| `missing required tools` | Добавить поле `tools`. |
+| `tools must be a JSON-style list of strings` | Записать `tools` как `["read_file", "search_code"]`. |
+| `invalid profile` | Использовать только `read-only` или `writable`. |
+| `delegate_task is not allowed inside subagent tools` | Убрать рекурсивную делегацию из списка tools. |
+| `subagent shadows builtin name without override` | Переименовать роль или добавить `override: true`, если перекрытие осознанное. |
+
+## Настройки
+
+Глобальные настройки находятся в `.madharness-mini/config.json`.
+
+| Поле | Значение по умолчанию | Смысл |
+| --- | --- | --- |
+| `orchestration_enabled` | `true` | Устаревший общий выключатель; `false` отключает `delegate_task`, если `orchestration_mode` оставлен в `auto`. |
+| `orchestration_mode` | `auto` | Режим доступности оркестрации: `off`, `requested`, `auto`, `required`. |
+| `subagent_max_turns` | `10` | Лимит ходов субагента без собственного `max_turns`. |
+| `subagent_context_max_tokens` | `30000` | Контекстный бюджет субагента без собственного `context_max_tokens`. |
+
+Режимы:
+
+| Режим | Поведение |
+| --- | --- |
+| `off` | Субагенты остаются доступными для `subagents list/show/validate`, но ведущий агент не видит `delegate_task`. |
+| `requested` | `delegate_task` появляется только когда задача явно просит субагентов, делегацию или оркестрацию. |
+| `auto` | `delegate_task` доступен в `run`, но ведущий агент может как делегировать, так и выполнить задачу сам. |
+| `required` | Строгий режим для smoke-test, длинных задач и учебных демонстраций: parent получает только `list_files`, `read_file`, `search_code` и `delegate_task`; writable-работа уходит в субагентов. |
+
+CLI-флаги одного запуска:
+
+```bash
+madharness-mini run --no-orchestrate "..."
+madharness-mini run --orchestrate "..."
+madharness-mini run --orchestration requested "..."
+madharness-mini run --orchestrate-required "..."
+```
+
+То же можно задать в `.env`:
+
+```text
+MADHARNESS_MINI_ORCHESTRATION_MODE=requested
+```
+
+## Безопасность
+
+Субагенты используют тот же `Policy`, что и основной агент. Файловые tools не могут выйти за `workspace_root` и не могут трогать `protected_paths`. Shell-команды проходят обычную проверку `run_shell`: запрещены управляющие операторы shell и явно рискованные команды.
+
+Project-local субагенты читаются только из `.madharness-mini/subagents/*.md`. Они не получают особых прав на файловую систему: даже writable-роль может писать только через обычные tools и только в рамках политики проекта.
+
+## Когда писать своего субагента
+
+Пользовательский субагент полезен, когда в проекте есть повторяющаяся роль с устойчивыми правилами: генератор тестов, документационный редактор, мигратор конфигов, ревьюер API-совместимости, сборщик changelog.
+
+Если задача одноразовая, обычно достаточно ведущего агента или встроенного `planner`/`implementer`. Субагент окупается, когда его prompt можно переиспользовать и проверить через `subagents validate`.

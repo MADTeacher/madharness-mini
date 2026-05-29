@@ -125,6 +125,9 @@ class PatchParser:
         return changes
 
     def _patch_path(self, raw: str) -> Path:
+        scope_error = self.ctx.write_path_error(raw)
+        if scope_error:
+            raise ValueError(scope_error)
         path, err = self.ctx.policy.safe_path(raw)
         if err or not path:
             raise ValueError(err or f"invalid path: {raw}")

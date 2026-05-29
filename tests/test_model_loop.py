@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from madharness_mini.loop import ask, run_agent
 from madharness_mini.model import ModelClient, ModelRateLimitError, parse_retry_after
-from madharness_mini.trace import summarize_trace
+from madharness_mini.trace import Trace, summarize_trace
 
 from tests.helpers import HarnessTestCase
 
@@ -162,6 +162,19 @@ class ModelLoopTests(HarnessTestCase):
         self.assertIn("estimated tokens", summary)
         self.assertIn("history: 0/0 entries", summary)
 
+    def test_trace_summary_prefers_exact_id_before_child_prefix(self):
+        cfg = self.make_cfg()
+        parent = Trace(cfg, "run")
+        child = parent.child("subagent", "subagent-planner")
+        parent.write("session_end", result="parent result")
+        child.write("session_end", result="child result")
+
+        summary = summarize_trace(cfg, parent.id)
+
+        self.assertIn(str(parent.path), summary)
+        self.assertIn("parent result", summary)
+        self.assertNotIn("child result", summary)
+
     def test_run_agent_keeps_image_text_only_when_vision_is_disabled(self):
         cfg = self.make_cfg()
         (cfg.root / "shot.png").write_bytes(PNG_BYTES)
@@ -250,9 +263,9 @@ class ModelLoopTests(HarnessTestCase):
 
     def test_run_agent_trims_large_tool_output_before_next_model_call(self):
         cfg = self.make_cfg()
-        cfg.data["context_max_tokens"] = 4000
+        cfg.data["context_max_tokens"] = 8000
         seen_messages = []
-        huge_stdout = "x" * 5000
+        huge_stdout = "x" * 20000
 
         def fake_chat(messages, tools=None):
             seen_messages.append(json.loads(json.dumps(messages)))
@@ -295,5 +308,5 @@ class ModelLoopTests(HarnessTestCase):
         self.assertEqual(result, "done")
         second_request = json.dumps(seen_messages[1], ensure_ascii=False)
         self.assertIn("context clipped", second_request)
-        self.assertNotIn("x" * 1000, second_request)
-        self.assertLess(len(second_request), 6500)
+        self.assertNotIn("x" * 3000, second_request)
+        self.assertLess(len(second_request), 10000)

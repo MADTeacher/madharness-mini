@@ -83,6 +83,43 @@ class ConfigCliTests(HarnessTestCase):
         self.assertEqual(cfg.data["max_image_bytes"], 42)
         self.assertEqual(cfg.data["image_detail"], "high")
 
+    def test_env_file_overrides_orchestration_settings(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
+        (root / ".env").write_text(
+            "MADHARNESS_MINI_ORCHESTRATION_ENABLED=false\n"
+            "MADHARNESS_MINI_ORCHESTRATION_MODE=requested\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(root)
+
+        self.addCleanup(tmp.cleanup)
+        self.assertIs(cfg.data["orchestration_enabled"], False)
+        self.assertEqual(cfg.data["orchestration_mode"], "requested")
+
+    def test_env_file_rejects_unknown_orchestration_mode(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
+        (root / ".env").write_text(
+            "MADHARNESS_MINI_ORCHESTRATION_MODE=always\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "MADHARNESS_MINI_ORCHESTRATION_MODE",
+            ):
+                Config(root)
+
+        self.addCleanup(tmp.cleanup)
+
     def test_env_file_rejects_unknown_image_detail(self):
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name)
@@ -148,6 +185,25 @@ class ConfigCliTests(HarnessTestCase):
         )
         self.assertEqual(data["api_key"], "")
         self.assertIn("Ключ API не задан", out.getvalue())
+
+    def test_run_command_passes_orchestration_flag(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        old_cwd = os.getcwd()
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(os.chdir, old_cwd)
+        os.chdir(root)
+        out = StringIO()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("madharness_mini.cli.run_agent", return_value=("ok", "trace.jsonl")) as run,
+            redirect_stdout(out),
+        ):
+            main(["run", "--orchestrate-required", "сделай проект"])
+
+        self.assertEqual(run.call_args.kwargs["orchestration_mode"], "required")
+        self.assertIn("ok", out.getvalue())
 
     def test_init_command_prompts_with_default_router_model_and_config(self):
         tmp = tempfile.TemporaryDirectory()

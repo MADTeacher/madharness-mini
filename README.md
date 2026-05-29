@@ -19,7 +19,7 @@ madharness-mini init \
   --api-key "ключ-доступа-openrouter"
 ```
 
-Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths` и `allow_shell`. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
+Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths`, `allow_shell` и настройки субагентов. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
 
 Задайте простой вопрос:
 
@@ -33,10 +33,26 @@ madharness-mini ask "Объясни, что делает этот проект"
 madharness-mini run "Найди команду для запуска тестов и объясни, что она проверяет"
 ```
 
+Оркестрация субагентов в `run` регулируется отдельно. По умолчанию режим `auto`: ведущий агент видит `delegate_task`, но может выполнить маленькую задачу сам. Для одного запуска можно явно выбрать поведение:
+
+```bash
+madharness-mini run --no-orchestrate "Обнови короткий текст"
+madharness-mini run --orchestration requested "Используй субагентов для большого рефакторинга"
+madharness-mini run --orchestrate-required "Проведи smoke-test researcher/planner/implementer/reviewer"
+```
+
+Для локального проекта то же задаётся в `.env`, например `MADHARNESS_MINI_ORCHESTRATION_MODE=requested`.
+
 При необходимости добавьте проектный skill в `.madharness_mini/skills/<name>/SKILL.md` или `.agents/skills/<name>/SKILL.md`. В режиме `run` его можно подключить явно:
 
 ```bash
 madharness-mini run "@skill:docs-writer обнови README"
+```
+
+Для собственной роли субагента добавьте markdown-файл в `.madharness-mini/subagents/<name>.md`. Frontmatter задаёт `name`, `description`, `profile`, `tools` и лимиты, а тело файла становится системным prompt субагента. Проверить каталог можно так:
+
+```bash
+madharness-mini subagents list
 ```
 
 Для подключения stdio MCP-сервера добавьте отдельный файл `.madharness-mini/mcp.json`. Например, для Playwright MCP:
@@ -71,6 +87,7 @@ uv tool update-shell
 - [Agent Skills](docs/agent-skills.md): принцип работы проектных навыков, активация, ресурсы, безопасность и трассы.
 - [План поддержки Agent Skills](docs/agent-skills-plan.html): формат навыков, подключение через контекст и этапы внедрения.
 - [MCP](docs/mcp.md): подключение stdio MCP-серверов, формат `mcp.json`, lifecycle, безопасность и трассы.
+- [Субагенты](docs/subagents.md): роли, project-local субагенты, tool profiles, `ask_user` и локальные traces.
 
 ## Разработка самого проекта
 

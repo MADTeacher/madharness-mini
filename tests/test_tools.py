@@ -98,6 +98,27 @@ class ToolTests(HarnessTestCase):
         )
         self.assertFalse(obs["ok"])
 
+    def test_write_scope_limits_write_file_to_allowed_suffixes(self):
+        cfg = self.make_cfg()
+        registry = ToolRegistry(
+            cfg,
+            writable_suffixes=(".md",),
+            write_scope_description="planner may write only Markdown plan files (.md)",
+        )
+
+        denied = registry.call(
+            "write_file", {"path": "index.html", "content": "<html></html>\n"}
+        )
+        allowed = registry.call(
+            "write_file", {"path": "PLAN.md", "content": "# Plan\n"}
+        )
+
+        self.assertFalse(denied["ok"])
+        self.assertIn("planner may write only Markdown plan files", denied["summary"])
+        self.assertFalse((cfg.root / "index.html").exists())
+        self.assertTrue(allowed["ok"])
+        self.assertEqual((cfg.root / "PLAN.md").read_text(encoding="utf-8"), "# Plan\n")
+
     def test_apply_patch_is_registered(self):
         schemas = ToolRegistry(self.make_cfg()).schemas()
         names = [item["function"]["name"] for item in schemas]
@@ -335,6 +356,47 @@ class ToolTests(HarnessTestCase):
         self.assertEqual(
             (cfg.root / "added.txt").read_text(encoding="utf-8"), "hello\nworld\n"
         )
+
+    def test_write_scope_limits_apply_patch_paths(self):
+        cfg = self.make_cfg()
+        registry = ToolRegistry(
+            cfg,
+            writable_suffixes=(".md",),
+            write_scope_description="planner may write only Markdown plan files (.md)",
+        )
+
+        denied = registry.call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Add File: index.html",
+                        "+<html></html>",
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+        allowed = registry.call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Add File: PLAN.md",
+                        "+# Plan",
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(denied["ok"])
+        self.assertIn("planner may write only Markdown plan files", denied["summary"])
+        self.assertFalse((cfg.root / "index.html").exists())
+        self.assertTrue(allowed["ok"])
+        self.assertEqual((cfg.root / "PLAN.md").read_text(encoding="utf-8"), "# Plan\n")
 
     def test_apply_patch_deletes_file(self):
         cfg = self.make_cfg()
