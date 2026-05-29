@@ -17,9 +17,8 @@ OpenAI-совместимого Chat Completions API.
 `id`, `source`, `text`, `priority`, `placement` и `transient`.
 
 `ContextProvider` — простой protocol для расширений. Provider получает
-`ContextState` и возвращает дополнительные `ContextFragment`. Так будущие
-навыки, MCP, субагенты и команды смогут добавлять инструкции без импорта
-`loop.py` или `model.py`.
+`ContextState` и возвращает дополнительные `ContextFragment`. В этой ветке так
+подключается catalog Agent Skills без импорта `loop.py` или `model.py`.
 
 `ContextManager` хранит задачу пользователя, закреплённые фрагменты и историю
 assistant/tool сообщений. Основной метод `messages()` возвращает готовый список
