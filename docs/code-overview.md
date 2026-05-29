@@ -49,7 +49,7 @@ MCP включается отдельным файлом `.madharness-mini/mcp.j
 
 - [Agent Skills в madharness-mini](agent-skills.md)
 - [План поддержки Agent Skills](agent-skills-plan.html)
-- [Дорожная карта MCP](mcp-roadmap.md)
+- [MCP в madharness-mini](mcp.md)
 
 Трассы лежат в `.madharness-mini/traces/*.jsonl`. Каждая строка - отдельное событие: старт сессии, вызов модели, ответ модели, наблюдение инструмента или итоговый результат. События `model_call_started` включают `context_report`, чтобы можно было увидеть токеновую оценку и состав контекста перед запросом. Команда `madharness-mini trace <id>` читает такой файл и показывает краткую сводку.
 

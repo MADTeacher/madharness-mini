@@ -70,7 +70,7 @@ uv tool update-shell
 - [Слой контекста](docs/context-layer.md): как собираются сообщения для модели и как расширения добавляют свой контекст.
 - [Agent Skills](docs/agent-skills.md): принцип работы проектных навыков, активация, ресурсы, безопасность и трассы.
 - [План поддержки Agent Skills](docs/agent-skills-plan.html): формат навыков, подключение через контекст и этапы внедрения.
-- [Дорожная карта MCP](docs/mcp-roadmap.md): минимальный stdio MCP-клиент на чистом Python и адаптация MCP tools.
+- [MCP](docs/mcp.md): подключение stdio MCP-серверов, формат `mcp.json`, lifecycle, безопасность и трассы.
 
 ## Разработка самого проекта
 
