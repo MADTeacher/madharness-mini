@@ -80,7 +80,16 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
 
     trace = Trace(cfg, "ask")
     context = base_context(cfg, task)
-    messages = context.messages()
+    try:
+        messages = context.messages()
+    except RuntimeError as exc:
+        trace.write(
+            "context_error",
+            error=str(exc),
+            context_report=_safe_context_report(context),
+        )
+        trace.write("session_end", result=f"error: {exc}")
+        raise
     trace.write("model_call_started", tools_count=0, context_report=context.report())
     try:
         raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
@@ -107,7 +116,17 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     context = base_context(cfg, task)
     for turn in range(int(cfg.data["max_turns"])):
         tool_schemas = tools_registry.schemas()
-        messages = context.messages(tool_schemas)
+        try:
+            messages = context.messages(tool_schemas)
+        except RuntimeError as exc:
+            trace.write(
+                "context_error",
+                turn=turn,
+                error=str(exc),
+                context_report=_safe_context_report(context),
+            )
+            trace.write("session_end", result=f"error: {exc}")
+            raise
         trace.write(
             "model_call_started",
             turn=turn,
@@ -143,3 +162,12 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     result = "Agent stopped: max_turns exceeded."
     trace.write("session_end", result=result)
     return result, trace.path
+
+
+def _safe_context_report(context: ContextManager) -> dict[str, Any]:
+    """Пишем context error в trace, даже если повторная сборка отчёта тоже падает."""
+
+    try:
+        return context.report()
+    except Exception as exc:
+        return {"error": str(exc)}

@@ -10,12 +10,20 @@ from typing import Any
 from .budget import (
     TOKEN_ESTIMATE_BYTES_PER_TOKEN,
     clip_tool_messages,
+    clip_text,
     estimate_request_tokens,
     estimate_tokens,
 )
 from .fragments import ContextFragment, ContextProvider, ContextState
 from .history import HistoryEntry
 from .render import render_messages
+
+# Полный assistant-текст полезен только до разумного предела: модель уже
+# получила свои рассуждения в прошлом ходе, а следующий запрос платит за них снова.
+ASSISTANT_CONTENT_LIMIT = 8000
+
+# Если assistant сразу вызывает tool, его текст обычно служебный; сохраняем кратко.
+ASSISTANT_TOOL_CONTENT_LIMIT = 2000
 
 
 class ContextManager:
@@ -54,8 +62,7 @@ class ContextManager:
     def record_assistant(self, message: dict[str, Any]) -> None:
         """Запоминаем ответ модели как следующий атомарный элемент истории."""
 
-        stored = copy.deepcopy(message)
-        stored.setdefault("role", "assistant")
+        stored = _sanitize_assistant_message(message)
         expected = {
             str(call.get("id"))
             for call in stored.get("tool_calls") or []
@@ -133,6 +140,27 @@ class ContextManager:
             truncated = truncated or bool(dropped_entries)
             current_estimate = estimate_request_tokens(messages, tools)
 
+        if (
+            self.max_tokens
+            and current_estimate["request_tokens_estimate"] > self.max_tokens
+        ):
+            forced_dropped = self._drop_old_entries_until_budget(
+                fragments,
+                entries,
+                entry_indexes,
+                tools,
+                keep_recent_turns=0,
+                forced=True,
+            )
+            dropped_entries.extend(forced_dropped)
+            messages = render_messages(self.user_task, fragments, entries)
+            truncated = truncated or bool(forced_dropped)
+            current_estimate = estimate_request_tokens(messages, tools)
+
+        hard_limit_exceeded = bool(
+            self.max_tokens
+            and current_estimate["request_tokens_estimate"] > self.max_tokens
+        )
         self._last_stats = {
             "context_tokens_estimate": current_estimate["request_tokens_estimate"],
             "messages_tokens_estimate": current_estimate["messages_tokens_estimate"],
@@ -141,6 +169,7 @@ class ContextManager:
             "history_entries": len(self._history),
             "dropped_entries": len(dropped_entries),
             "truncated": truncated,
+            "hard_limit_exceeded": hard_limit_exceeded,
         }
         self._last_report = {
             "max_tokens": self.max_tokens,
@@ -148,6 +177,7 @@ class ContextManager:
             **current_estimate,
             "over_budget": bool(self.max_tokens and initial_tokens > self.max_tokens),
             "truncated": truncated,
+            "hard_limit_exceeded": hard_limit_exceeded,
             "fragments": [_fragment_report(fragment) for fragment in fragments],
             "history": {
                 "total_entries": len(self._history),
@@ -162,6 +192,12 @@ class ContextManager:
                 ],
             },
         }
+        if hard_limit_exceeded:
+            raise RuntimeError(
+                "context budget exceeded after truncation: "
+                f"{current_estimate['request_tokens_estimate']}/{self.max_tokens} "
+                "estimated tokens"
+            )
         return messages
 
     def stats(self) -> dict[str, int | bool]:
@@ -216,12 +252,17 @@ class ContextManager:
         entries: list[HistoryEntry],
         entry_indexes: list[int],
         tools: list[dict[str, Any]] | None,
+        keep_recent_turns: int | None = None,
+        forced: bool = False,
     ) -> list[dict[str, Any]]:
         """Удаляем старые неприкреплённые элементы, сохраняя недавнюю историю."""
 
         dropped: list[dict[str, Any]] = []
         messages = render_messages(self.user_task, fragments, entries)
-        protected_start = max(len(entries) - self.keep_recent_turns, 0)
+        keep_recent = (
+            self.keep_recent_turns if keep_recent_turns is None else keep_recent_turns
+        )
+        protected_start = max(len(entries) - keep_recent, 0)
         while (
             entries
             and estimate_request_tokens(messages, tools)["request_tokens_estimate"]
@@ -233,14 +274,62 @@ class ContextManager:
             )
             if removable is None:
                 break
-            dropped.append(
-                _history_entry_report(entries[removable], entry_indexes[removable])
-            )
+            report = _history_entry_report(entries[removable], entry_indexes[removable])
+            if forced:
+                report["forced"] = True
+            dropped.append(report)
             del entries[removable]
             del entry_indexes[removable]
-            protected_start = max(len(entries) - self.keep_recent_turns, 0)
+            protected_start = max(len(entries) - keep_recent, 0)
             messages = render_messages(self.user_task, fragments, entries)
         return dropped
+
+
+def _sanitize_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Сохраняем в историю только поля, которые нужны следующему Chat request."""
+
+    tool_calls = _sanitize_tool_calls(message.get("tool_calls") or [])
+    content = message.get("content")
+    limit = ASSISTANT_TOOL_CONTENT_LIMIT if tool_calls else ASSISTANT_CONTENT_LIMIT
+    stored: dict[str, Any] = {"role": "assistant"}
+    if isinstance(content, str):
+        stored["content"] = clip_text(content, limit)
+    elif content is None:
+        stored["content"] = None if tool_calls else ""
+    else:
+        stored["content"] = copy.deepcopy(content)
+    if tool_calls:
+        stored["tool_calls"] = tool_calls
+    return stored
+
+
+def _sanitize_tool_calls(calls: list[Any]) -> list[dict[str, Any]]:
+    """Оставляем у tool call только OpenAI-compatible id, type и function."""
+
+    sanitized: list[dict[str, Any]] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = function.get("arguments", "{}")
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        sanitized.append(
+            {
+                "id": str(call.get("id") or name),
+                "type": str(call.get("type") or "function"),
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                },
+            }
+        )
+    return sanitized
 
 
 def _fragment_report(fragment: ContextFragment) -> dict[str, Any]:

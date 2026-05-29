@@ -13,6 +13,48 @@ def tool_call(call_id="call_1", name="demo"):
 
 
 class ContextManagerTests(HarnessTestCase):
+    def test_record_assistant_strips_vendor_fields_from_history(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant(
+            {
+                "role": "assistant",
+                "content": "I will call a tool.",
+                "reasoning": "secret provider reasoning",
+                "reasoning_details": [{"text": "very long chain"}],
+                "refusal": None,
+                "tool_calls": [
+                    {
+                        "id": "call_extra",
+                        "type": "function",
+                        "index": 0,
+                        "function": {
+                            "name": "demo",
+                            "arguments": {"path": "README.md"},
+                            "extra": "drop me",
+                        },
+                        "provider_field": "drop me too",
+                    }
+                ],
+            }
+        )
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertNotIn("reasoning", rendered)
+        self.assertNotIn("refusal", rendered)
+        self.assertNotIn("provider_field", rendered)
+        self.assertIn('"tool_calls"', rendered)
+        self.assertIn('\\"path\\": \\"README.md\\"', rendered)
+
+    def test_record_assistant_clips_large_content(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant({"role": "assistant", "content": "x" * 20000})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertIn("context clipped", rendered)
+        self.assertLess(len(rendered), 12000)
+
     def test_locked_fragments_and_task_survive_small_budget(self):
         ctx = ContextManager("do the task", max_tokens=90, keep_recent_turns=0)
         ctx.add_fragment(
@@ -121,6 +163,27 @@ class ContextManagerTests(HarnessTestCase):
         self.assertEqual(report["history"]["total_entries"], 1)
         self.assertEqual(len(report["history"]["dropped_entries"]), 1)
 
+    def test_hard_budget_can_drop_recent_history(self):
+        ctx = ContextManager("task", max_tokens=130, keep_recent_turns=3)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        for index in range(3):
+            ctx.record_assistant(
+                {
+                    "role": "assistant",
+                    "content": f"recent {index} " + "x" * 1000,
+                }
+            )
+
+        messages = ctx.messages()
+        report = ctx.report()
+
+        self.assertTrue(report["truncated"])
+        self.assertTrue(
+            any(item.get("forced") for item in report["history"]["dropped_entries"])
+        )
+        self.assertLessEqual(report["request_tokens_estimate"], report["max_tokens"])
+        self.assertNotIn("recent 0", json.dumps(messages, ensure_ascii=False))
+
     def test_report_describes_fragments_and_tool_clipping_without_content(self):
         ctx = ContextManager("task", max_tokens=400, keep_recent_turns=3)
         ctx.add_fragment(
@@ -170,7 +233,8 @@ class ContextManagerTests(HarnessTestCase):
             }
         ]
 
-        ctx.messages(tools)
+        with self.assertRaisesRegex(RuntimeError, "context budget exceeded"):
+            ctx.messages(tools)
         report = ctx.report()
 
         self.assertGreater(report["tools_tokens_estimate"], 0)
@@ -179,3 +243,4 @@ class ContextManagerTests(HarnessTestCase):
             report["messages_tokens_estimate"],
         )
         self.assertTrue(report["over_budget"])
+        self.assertTrue(report["hard_limit_exceeded"])

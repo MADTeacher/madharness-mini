@@ -240,6 +240,7 @@ class ToolTests(HarnessTestCase):
         self.assertIn("not for editing files", prompt)
         self.assertIn("`command` argument of `run_shell`", prompt)
         self.assertIn("never use a command itself as a tool name", prompt)
+        self.assertIn("same tool returns the same error", prompt)
 
     def test_unknown_tool_returns_fail_observation(self):
         obs = ToolRegistry(self.make_cfg()).call("missing_tool", {})
