@@ -8,10 +8,13 @@ from typing import Any
 from .config import Config
 from .context import ContextProvider
 from .context.bootstrap import base_context
+from .hooks import HookManager
 from .model import ModelClient
 from .model_loop import (
     apply_hidden_observation_effects,
     call_model_with_rate_limit_retry,
+    emit_session_error,
+    model_message_summary,
     run_model_loop,
     safe_context_report,
 )
@@ -45,6 +48,12 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
     """
 
     trace = Trace(cfg, "ask")
+    hooks = HookManager.from_config(cfg, trace)
+    hooks.emit(
+        "session_start",
+        kind="ask",
+        data={"task_preview": task[:1000], "cwd": str(cfg.cwd)},
+    )
     context = base_context(cfg, task)
     try:
         messages = context.messages()
@@ -55,17 +64,36 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
             context_report=safe_context_report(context),
         )
         trace.write("session_end", result=f"error: {exc}")
+        emit_session_error(hooks, "ask", exc)
         raise
-    trace.write("model_call_started", tools_count=0, context_report=context.report())
+    context_report = context.report()
+    trace.write("model_call_started", tools_count=0, context_report=context_report)
+    hooks.emit(
+        "before_model_call",
+        kind="ask",
+        data={"tools_count": 0, "context_report": context_report},
+    )
     try:
         raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
     except RuntimeError as exc:
         trace.write("model_error", error=str(exc))
         trace.write("session_end", result=f"error: {exc}")
+        emit_session_error(hooks, "ask", exc)
         raise
     trace.write("model_call_finished", raw=raw)
-    content = raw["choices"][0]["message"].get("content") or ""
+    message = raw["choices"][0]["message"]
+    hooks.emit(
+        "after_model_call",
+        kind="ask",
+        data={"message": model_message_summary(message)},
+    )
+    content = message.get("content") or ""
     trace.write("session_end", result=content)
+    hooks.emit(
+        "session_end",
+        kind="ask",
+        data={"status": "done", "turns": 1, "result_preview": content[:1000]},
+    )
     return content, trace.path
 
 
@@ -82,6 +110,12 @@ def run_agent(
     """
 
     trace = Trace(cfg, "run")
+    hooks = HookManager.from_config(cfg, trace)
+    hooks.emit(
+        "session_start",
+        kind="run",
+        data={"task_preview": task[:1000], "cwd": str(cfg.cwd)},
+    )
     client = ModelClient(cfg)
     skill_index = discover_skills(cfg)
     subagent_index = discover_subagents(cfg)
@@ -117,7 +151,9 @@ def run_agent(
         names = ", ".join(explicit_skills.unknown)
         result = f"error: unknown skill: {names}"
         trace.write("session_end", result=result)
-        raise RuntimeError(f"unknown skill: {names}")
+        exc = RuntimeError(f"unknown skill: {names}")
+        emit_session_error(hooks, "run", exc)
+        raise exc
 
     skill_runtime = SkillRuntime(cfg, skill_index)
     context_providers: list[ContextProvider] = []
@@ -137,6 +173,7 @@ def run_agent(
                     trace,
                     subagent,
                     args,
+                    hooks,
                 ),
             )
         )
@@ -158,7 +195,9 @@ def run_agent(
             if not obs.get("ok"):
                 result = f"error: {obs.get('summary')}"
                 trace.write("session_end", result=result)
-                raise RuntimeError(str(obs.get("summary")))
+                exc = RuntimeError(str(obs.get("summary")))
+                emit_session_error(hooks, "run", exc)
+                raise exc
             apply_hidden_observation_effects(context, trace, obs)
 
         loop_result = run_model_loop(
@@ -167,6 +206,8 @@ def run_agent(
             context,
             tools_registry,
             int(cfg.data["max_turns"]),
+            hooks=hooks,
+            kind="run",
         )
         return str(loop_result["result"]), trace.path
     finally:

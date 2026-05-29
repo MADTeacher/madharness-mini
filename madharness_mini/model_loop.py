@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from .context import ContextManager
+from .hooks import HookDecision, HookManager
 from .model import ModelClient, ModelRateLimitError
 from .tools import ToolRegistry
 from .trace import Trace
@@ -52,6 +53,8 @@ def run_model_loop(
     max_turns: int,
     *,
     stop_on_user_input: bool = False,
+    hooks: HookManager | None = None,
+    kind: str = "run",
 ) -> dict[str, Any]:
     """Ведём модель через ходы assistant/tool до финального результата."""
 
@@ -67,12 +70,24 @@ def run_model_loop(
                 context_report=safe_context_report(context),
             )
             trace.write("session_end", result=f"error: {exc}")
+            emit_session_error(hooks, kind, exc, turn=turn)
             raise
+        context_report = context.report()
         trace.write(
             "model_call_started",
             turn=turn,
             tools_count=len(tool_schemas),
-            context_report=context.report(),
+            context_report=context_report,
+        )
+        emit_hook(
+            hooks,
+            "before_model_call",
+            kind=kind,
+            data={
+                "turn": turn,
+                "tools_count": len(tool_schemas),
+                "context_report": context_report,
+            },
         )
         try:
             raw = call_model_with_rate_limit_retry(
@@ -81,19 +96,54 @@ def run_model_loop(
         except RuntimeError as exc:
             trace.write("model_error", turn=turn, error=str(exc))
             trace.write("session_end", result=f"error: {exc}")
+            emit_session_error(hooks, kind, exc, turn=turn)
             raise
         message = raw["choices"][0]["message"]
         trace.write("model_call_finished", turn=turn, message=message)
+        emit_hook(
+            hooks,
+            "after_model_call",
+            kind=kind,
+            data={"turn": turn, "message": model_message_summary(message)},
+        )
         context.record_assistant(message)
         calls = message.get("tool_calls") or []
         if not calls:
             result = message.get("content") or ""
             trace.write("session_end", result=result)
+            emit_hook(
+                hooks,
+                "session_end",
+                kind=kind,
+                data={
+                    "status": "done",
+                    "turns": turn + 1,
+                    "result_preview": result[:1000],
+                },
+            )
             return {"status": "done", "result": result, "turns": turn + 1}
         for call in calls:
             try:
                 name, args = parse_tool_args(call)
-                obs = tools_registry.call(name, args)
+                decision = emit_hook(
+                    hooks,
+                    "before_tool_call",
+                    kind=kind,
+                    data={
+                        "turn": turn,
+                        "call_id": str(call.get("id") or ""),
+                        "tool": name,
+                        "args": args,
+                    },
+                )
+                if decision.ok:
+                    obs = tools_registry.call(name, args)
+                else:
+                    obs = fail(
+                        name,
+                        f"blocked by hook: {decision.block}",
+                        hook_blocked=True,
+                    )
             except Exception as exc:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")
@@ -101,10 +151,31 @@ def run_model_loop(
             subagent_stop = obs.pop("_subagent_stop", "")
             apply_hidden_observation_effects(context, trace, obs)
             trace.write("tool_observation", tool=name, args=args, observation=obs)
+            emit_hook(
+                hooks,
+                "after_tool_call",
+                kind=kind,
+                data={
+                    "turn": turn,
+                    "tool": name,
+                    "args": args,
+                    "observation": obs,
+                },
+            )
             if stop_on_user_input and subagent_stop == "needs_user_input":
                 trace.write(
                     "session_end",
                     result=f"needs_user_input: {obs.get('question', '')}",
+                )
+                emit_hook(
+                    hooks,
+                    "session_end",
+                    kind=kind,
+                    data={
+                        "status": "needs_user_input",
+                        "turns": turn + 1,
+                        "result_preview": str(obs.get("question", ""))[:1000],
+                    },
                 )
                 return {
                     "status": "needs_user_input",
@@ -125,6 +196,16 @@ def run_model_loop(
                     subagent_trace_path=obs.get("subagent_trace_path", ""),
                 )
                 trace.write("session_end", result=result)
+                emit_hook(
+                    hooks,
+                    "session_end",
+                    kind=kind,
+                    data={
+                        "status": "needs_user_input",
+                        "turns": turn + 1,
+                        "result_preview": result[:1000],
+                    },
+                )
                 return {
                     "status": "needs_user_input",
                     "result": result,
@@ -133,7 +214,69 @@ def run_model_loop(
                 }
     result = "Agent stopped: max_turns exceeded."
     trace.write("session_end", result=result)
+    emit_hook(
+        hooks,
+        "session_end",
+        kind=kind,
+        data={"status": "max_turns", "turns": max_turns, "result_preview": result},
+    )
     return {"status": "max_turns", "result": result, "turns": max_turns}
+
+
+def emit_hook(
+    hooks: HookManager | None,
+    name: str,
+    *,
+    kind: str,
+    data: dict[str, Any],
+) -> HookDecision:
+    """Вызываем hooks, если manager подключён к этому запуску."""
+
+    if hooks is None:
+        return HookDecision()
+    return hooks.emit(name, kind=kind, data=data)
+
+
+def emit_session_error(
+    hooks: HookManager | None,
+    kind: str,
+    exc: Exception,
+    *,
+    turn: int | None = None,
+) -> None:
+    """Сообщаем пользовательским hooks об ошибке сессии."""
+
+    emit_hook(
+        hooks,
+        "session_error",
+        kind=kind,
+        data={
+            "turn": turn,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        },
+    )
+
+
+def model_message_summary(message: dict[str, Any]) -> dict[str, Any]:
+    """Передаём hooks краткую сводку ответа модели без полного payload."""
+
+    calls = message.get("tool_calls") or []
+    content = message.get("content") or ""
+    tools = []
+    for call in calls:
+        fn = call.get("function") or {}
+        tools.append(
+            {
+                "id": str(call.get("id") or ""),
+                "name": str(fn.get("name") or ""),
+            }
+        )
+    return {
+        "content_preview": str(content)[:1000],
+        "tool_calls_count": len(calls),
+        "tools": tools,
+    }
 
 
 def apply_hidden_observation_effects(

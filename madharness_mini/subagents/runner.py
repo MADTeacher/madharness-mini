@@ -7,8 +7,9 @@ from typing import Any
 from ..config import Config
 from ..context import ContextFragment
 from ..context.bootstrap import base_context
+from ..hooks import HookManager
 from ..model import ModelClient
-from ..model_loop import run_model_loop
+from ..model_loop import emit_session_error, run_model_loop
 from ..tools import ToolRegistry
 from ..trace import Trace
 from ..utils import fail, ok
@@ -23,6 +24,7 @@ def run_subagent(
     parent_trace: Trace,
     subagent: Subagent,
     args: dict[str, Any],
+    hooks: HookManager | None = None,
 ) -> dict[str, Any]:
     """Запускаем делегированный agent loop с локальным trace и своим allow-list."""
 
@@ -35,6 +37,17 @@ def run_subagent(
     except RuntimeError as exc:
         return fail("delegate_task", str(exc), subagent=subagent.name)
     sub_trace = parent_trace.child("subagent", f"subagent-{subagent.name}")
+    sub_hooks = hooks.with_trace(sub_trace) if hooks else None
+    if sub_hooks:
+        sub_hooks.emit(
+            "session_start",
+            kind="subagent",
+            data={
+                "subagent": subagent.name,
+                "task_preview": task[:1000],
+                "parent_trace_id": parent_trace.id,
+            },
+        )
     trace_path = trace_path_for_observation(sub_trace.path, cfg.cwd)
     parent_trace.write(
         "subagent_started",
@@ -52,6 +65,7 @@ def run_subagent(
             task,
             str(args.get("context") or "").strip(),
             allowed_tools,
+            sub_hooks,
         )
     except RuntimeError as exc:
         parent_trace.write(
@@ -61,6 +75,8 @@ def run_subagent(
             trace_path=trace_path,
             error=str(exc),
         )
+        if sub_hooks:
+            emit_session_error(sub_hooks, "subagent", exc)
         return fail(
             "delegate_task",
             f"subagent failed: {exc}",
@@ -119,6 +135,7 @@ def _run_subagent_loop(
     task: str,
     parent_context: str,
     allowed_tools: tuple[str, ...],
+    hooks: HookManager | None = None,
 ) -> dict[str, Any]:
     """Готовим контекст и tools одного субагента, затем запускаем общий loop."""
 
@@ -156,6 +173,8 @@ def _run_subagent_loop(
             registry,
             max_turns,
             stop_on_user_input=True,
+            hooks=hooks,
+            kind="subagent",
         )
     finally:
         registry.close()

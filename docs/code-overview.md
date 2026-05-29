@@ -14,6 +14,7 @@
 | `madharness_mini/skills/` | Ищет project-local Agent Skills, строит каталог, активирует `SKILL.md` как контекстный фрагмент и отдаёт provider инструмента `activate_skill`. |
 | `madharness_mini/subagents/` | Загружает markdown-субагентов, добавляет `delegate_task` и `ask_user`, вычисляет режим оркестрации, запускает дочерний loop и строит сводку локальных trace-файлов. |
 | `madharness_mini/mcp/` | Минимальный stdio MCP-клиент: отдельный `mcp.json`, JSON-RPC, subprocess transport, adapter в `ToolSpec`. |
+| `madharness_mini/hooks/` | Пользовательские lifecycle hooks из `.madharness-mini/hooks.json`: command handlers получают JSON-события, пишут audit в trace и могут блокировать `before_tool_call`. |
 | `madharness_mini/policy.py` | Проверяет, что инструменты не выходят за workspace и не запускают явно рискованные команды. |
 | `madharness_mini/instructions.py` | Загружает встроенный системный промпт и собирает проектные инструкции `AGENTS.md`. |
 | `madharness_mini/prompts/subagents/` | Markdown-конфиги и системные prompt-файлы встроенных ролей `researcher`, `planner`, `implementer`, `reviewer`. |
@@ -25,18 +26,19 @@
 1. `cli.main()` читает аргументы командной строки и создаёт `Config`.
 2. `Config` загружает локальные настройки из `.madharness-mini/config.json`, затем применяет `.env` и переменные `MADHARNESS_MINI_*`.
 3. `run_agent()` создаёт `Trace`, `ModelClient`, запускает discovery Agent Skills и загружает markdown-субагентов из `madharness_mini/prompts/subagents/*.md` и `.madharness-mini/subagents/*.md`.
-4. `subagents/orchestration.py` вычисляет режим оркестрации (`off`, `requested`, `auto`, `required`) из конфига, `.env` и CLI-флагов; `run_agent()` пишет событие `orchestration_mode`.
-5. Если пользователь явно указал skill, он активируется до первого model call; иначе в контекст добавляется compact catalog, а в registry — provider `activate_skill`.
-6. `context/bootstrap.py` создаёт `ContextManager`, берёт системный промпт из `prompts/system.md` и добавляет найденные проектные инструкции `AGENTS.md` как закреплённый фрагмент.
-7. `ToolRegistry` регистрирует встроенные инструменты, `activate_skill`, `delegate_task` при разрешённой оркестрации и MCP tools из `.madharness-mini/mcp.json`, если этот файл есть.
-8. `ContextManager.messages()` собирает system/user/history сообщения и применяет символьный бюджет контекста.
-9. `ModelClient.chat()` отправляет сообщения и схемы инструментов в LLM API.
-10. Если модель вернула обычный текст, `model_loop.py` завершает запуск и пишет результат в трассу.
-11. Если модель вернула `tool_calls`, `ToolRegistry.call()` находит `ToolSpec` по имени и вызывает handler инструмента.
-12. Handler получает `ToolContext` с `Config`, `Policy`, трассой и runtime навыков, чтобы проверить путь, shell-команду, активацию skill или делегацию субагенту.
-13. `ContextManager.record_assistant()` и `record_tool_result()` добавляют ответ модели и observation инструмента в историю. Служебные эффекты вроде нового context-фрагмента от `activate_skill` применяются отдельно и не попадают в observation.
-14. Если модель вызывает `delegate_task`, `subagents/runner.py` запускает дочерний agent loop с собственным контекстом, allow-list tools из markdown-файла и локальным trace.
-15. Цикл продолжается до финального ответа модели или до лимита `max_turns`.
+4. `HookManager` читает `.madharness-mini/hooks.json`, если файл есть, и пишет `session_start` в пользовательские hooks.
+5. `subagents/orchestration.py` вычисляет режим оркестрации (`off`, `requested`, `auto`, `required`) из конфига, `.env` и CLI-флагов; `run_agent()` пишет событие `orchestration_mode`.
+6. Если пользователь явно указал skill, он активируется до первого model call; иначе в контекст добавляется compact catalog, а в registry — provider `activate_skill`.
+7. `context/bootstrap.py` создаёт `ContextManager`, берёт системный промпт из `prompts/system.md` и добавляет найденные проектные инструкции `AGENTS.md` как закреплённый фрагмент.
+8. `ToolRegistry` регистрирует встроенные инструменты, `activate_skill`, `delegate_task` при разрешённой оркестрации и MCP tools из `.madharness-mini/mcp.json`, если этот файл есть.
+9. `ContextManager.messages()` собирает system/user/history сообщения и применяет символьный бюджет контекста.
+10. `ModelClient.chat()` отправляет сообщения и схемы инструментов в LLM API.
+11. Если модель вернула обычный текст, `model_loop.py` завершает запуск и пишет результат в трассу.
+12. Если модель вернула `tool_calls`, `model_loop.py` вызывает hook `before_tool_call`; блокировка превращается в обычное fail-observation, иначе `ToolRegistry.call()` вызывает handler инструмента.
+13. Handler получает `ToolContext` с `Config`, `Policy`, трассой и runtime навыков, чтобы проверить путь, shell-команду, активацию skill или делегацию субагенту.
+14. `ContextManager.record_assistant()` и `record_tool_result()` добавляют ответ модели и observation инструмента в историю. Служебные эффекты вроде нового context-фрагмента от `activate_skill` применяются отдельно и не попадают в observation.
+15. Если модель вызывает `delegate_task`, `subagents/runner.py` запускает дочерний agent loop с собственным контекстом, allow-list tools из markdown-файла и локальным trace.
+16. Цикл продолжается до финального ответа модели или до лимита `max_turns`.
 
 ## Данные и границы
 
@@ -56,6 +58,7 @@ MCP включается отдельным файлом `.madharness-mini/mcp.j
 
 - [Agent Skills в madharness-mini](agent-skills.md)
 - [План поддержки Agent Skills](agent-skills-plan.html)
+- [Hooks в madharness-mini](hooks.md)
 - [MCP в madharness-mini](mcp.md)
 - [Субагенты](subagents.md)
 
