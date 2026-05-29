@@ -250,7 +250,7 @@ class ModelLoopTests(HarnessTestCase):
 
     def test_run_agent_trims_large_tool_output_before_next_model_call(self):
         cfg = self.make_cfg()
-        cfg.data["context_max_tokens"] = 1800
+        cfg.data["context_max_tokens"] = 4000
         seen_messages = []
         huge_stdout = "x" * 5000
 
