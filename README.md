@@ -1,6 +1,40 @@
 # madharness-mini
 
-`madharness-mini` - это учебный харнесс для работы с ИИ-агентом над разрабатываемым приложением. Проект написан на Python 3.13+, без использования дополнительных пакетов.
+> Учебная ветка: `06-subagents`
+>
+> Тема главы: markdown-субагенты, роли и оркестрация внутри одного harness.
+>
+> В этой точке parent agent может получить инструмент `delegate_task`, запускать
+> встроенных или project-local субагентов, передавать им ограниченный набор
+> tools и получать отдельные дочерние trace-файлы.
+>
+> Лабораторные работы: [LABS.md](LABS.md)
+> Предыдущая ветка: `05-mcp`
+> Следующая ветка: `07-hooks`
+
+`madharness-mini` — учебный минималистичный харнесс для работы кодирующего
+ИИ-агента с локальным программным продуктом. Эта ветка показывает, как один
+agent loop можно превратить в маленькую оркестрацию ролей, не добавляя внешних
+runtime-зависимостей.
+
+Проект написан для Python 3.13+ и использует OpenAI-совместимый API
+`/chat/completions`.
+
+## Что есть в этой ветке
+
+- команды `init`, `ask`, `run`, `trace`, `skills` и `subagents`;
+- проектные инструкции `AGENTS.md`;
+- слой контекста с бюджетом и `context_report`;
+- project-local Agent Skills и `activate_skill`;
+- stdio MCP tools через `.madharness-mini/mcp.json`;
+- встроенные роли `researcher`, `planner`, `implementer`, `reviewer`;
+- project-local субагенты в `.madharness-mini/subagents/<name>.md`;
+- режимы оркестрации `off`, `requested`, `auto`, `required`;
+- инструменты `delegate_task` и, для разрешённых ролей, `ask_user`;
+- отдельные дочерние traces для запусков субагентов.
+
+В этой ветке ещё нет hooks. Здесь важны роли, profiles, allow-list tools и
+передача результата обратно parent agent.
 
 ## Быстрый запуск
 
@@ -10,7 +44,7 @@
 uv tool install madharness-mini --from git+https://github.com/MADTeacher/madharness-mini.git
 ```
 
-Откройте папку проекта, с которой должен работать агент, и создайте настройку:
+Перейдите в корень продукта и создайте локальную настройку:
 
 ```bash
 madharness-mini init \
@@ -19,94 +53,80 @@ madharness-mini init \
   --api-key "ключ-доступа-openrouter"
 ```
 
-Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths`, `allow_shell` и настройки субагентов. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
+## Оркестрация
 
-Задайте простой вопрос:
+По умолчанию используется режим `auto`: parent agent видит `delegate_task`, но
+может решить небольшую задачу сам.
 
-```bash
-madharness-mini ask "Объясни, что делает этот проект"
-```
-
-Запустите агентский режим для задачи по проекту:
-
-```bash
-madharness-mini run "Найди команду для запуска тестов и объясни, что она проверяет"
-```
-
-Оркестрация субагентов в `run` регулируется отдельно. По умолчанию режим `auto`: ведущий агент видит `delegate_task`, но может выполнить маленькую задачу сам. Для одного запуска можно явно выбрать поведение:
+Для одного запуска режим можно выбрать флагом:
 
 ```bash
 madharness-mini run --no-orchestrate "Обнови короткий текст"
-madharness-mini run --orchestration requested "Используй субагентов для большого рефакторинга"
-madharness-mini run --orchestrate-required "Проведи smoke-test researcher/planner/implementer/reviewer"
+madharness-mini run --orchestration requested "Используй субагентов для ревью"
+madharness-mini run --orchestrate-required "Разбей задачу между ролями"
 ```
 
-Для локального проекта то же задаётся в `.env`, например `MADHARNESS_MINI_ORCHESTRATION_MODE=requested`.
+В `.env` тот же выбор задаётся так:
 
-При необходимости добавьте проектный skill в `.madharness_mini/skills/<name>/SKILL.md` или `.agents/skills/<name>/SKILL.md`. В режиме `run` его можно подключить явно:
-
-```bash
-madharness-mini run "@skill:docs-writer обнови README"
+```text
+MADHARNESS_MINI_ORCHESTRATION_MODE=requested
 ```
 
-Для собственной роли субагента добавьте markdown-файл в `.madharness-mini/subagents/<name>.md`. Frontmatter задаёт `name`, `description`, `profile`, `tools` и лимиты, а тело файла становится системным prompt субагента. Проверить каталог можно так:
+Проверить встроенные и project-local роли:
 
 ```bash
 madharness-mini subagents list
+madharness-mini subagents validate
 ```
 
-Для подключения stdio MCP-сервера добавьте отдельный файл `.madharness-mini/mcp.json`. Например, для Playwright MCP:
+## Project-local субагент
 
-```json
-{
-  "servers": {
-    "playwright": {
-      "enabled": true,
-      "command": "npx",
-      "args": ["-y", "@playwright/mcp@latest"],
-      "cwd": ".",
-      "timeout_seconds": 30
-    }
-  }
-}
+Создайте `.madharness-mini/subagents/test-writer.md`:
+
+```md
+---
+name: test-writer
+description: Пишет минимальные unittest для изменённого кода.
+profile: writable
+tools: ["list_files", "read_file", "search_code", "apply_patch", "write_file", "run_shell", "ask_user"]
+max_turns: 10
+---
+
+Ты субагент test-writer.
+Пиши маленькие тесты рядом с существующими tests.
+Если не хватает требований, задай один короткий вопрос через ask_user.
 ```
 
-Если терминал не находит команду `madharness-mini`, выполните:
+`profile` не выдаёт полномочия сам по себе. Фактический набор доступных tools
+задаётся списком `tools`.
 
-```bash
-uv tool update-shell
-```
+## Документация ветки
 
-Потом закройте терминал и откройте его заново.
-
-## Дополнительная документация
-
-- [Возможности харнесса](docs/capabilities.md): режимы, инструменты агента, настройки и ограничения безопасности.
-- [Структура кода](docs/code-overview.md): модули проекта и поток выполнения агентского режима.
-- [Слой контекста](docs/context-layer.md): как собираются сообщения для модели и как расширения добавляют свой контекст.
-- [Agent Skills](docs/agent-skills.md): принцип работы проектных навыков, активация, ресурсы, безопасность и трассы.
-- [План поддержки Agent Skills](docs/agent-skills-plan.html): формат навыков, подключение через контекст и этапы внедрения.
-- [MCP](docs/mcp.md): подключение stdio MCP-серверов, формат `mcp.json`, lifecycle, безопасность и трассы.
-- [Субагенты](docs/subagents.md): роли, project-local субагенты, tool profiles, `ask_user` и локальные traces.
+- [Возможности ветки](docs/capabilities.md)
+- [Структура кода](docs/code-overview.md)
+- [Слой контекста](docs/context-layer.md)
+- [Agent Skills](docs/agent-skills.md)
+- [MCP](docs/mcp.md)
+- [Субагенты](docs/subagents.md)
+- [Инструмент apply_patch](docs/apply-patch.md)
 
 ## Разработка самого проекта
 
-Если вы меняете код `madharness-mini`, запускайте команду из корня этого репозитория через `uv run`, предварительно настроив .env:
-
-```bash
-uv run madharness-mini ask "Объясни, что делает этот проект"
-```
-
-Переустановить харнесс из локального проекта можно с помощью команды:
-
-```bash
-uv tool install --python 3.13 --force .
-```
-
-## Проверка
-
-Для запуска тестов введите следующую команду:
+Если вы меняете код `madharness-mini`, запускайте проверки из корня этого
+репозитория:
 
 ```bash
 uv run -m unittest discover -s tests
 ```
+
+Быстрая ручная проверка CLI:
+
+```bash
+uv run madharness-mini subagents list
+uv run madharness-mini subagents validate
+```
+
+## Что дальше
+
+Следующая ветка `07-hooks` добавляет lifecycle hooks: локальные команды проекта
+смогут наблюдать события harness и блокировать tool call до выполнения.
