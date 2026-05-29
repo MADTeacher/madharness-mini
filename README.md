@@ -1,6 +1,41 @@
 # madharness-mini
 
-`madharness-mini` - это учебный харнесс для работы с ИИ-агентом над разрабатываемым приложением. Проект написан на Python 3.13+, без использования дополнительных пакетов.
+> Учебная ветка: `04-Agents-Skills`
+>
+> Тема главы: project-local Agent Skills как управляемый способ добавлять
+> агенту workflow-инструкции и ресурсы.
+>
+> В этой точке harness умеет искать `SKILL.md`, показывать каталог навыков
+> модели, активировать skill через `activate_skill` и добавлять инструкции
+> навыка в durable context.
+>
+> Лабораторные работы: [LABS.md](LABS.md)
+> Предыдущая ветка: `03-Context-Layer`
+> Следующая ветка: `05-mcp`
+
+`madharness-mini` — учебный минималистичный харнесс для работы кодирующего
+ИИ-агента с локальным программным продуктом. Он даёт модели понятный цикл:
+получить задачу, увидеть контекст проекта, выбрать подходящий skill, вызвать
+инструменты и записать ход выполнения в trace.
+
+Проект написан для Python 3.13+ и не имеет runtime-зависимостей. Внутри
+используется OpenAI-совместимый API `/chat/completions`.
+
+## Что есть в этой ветке
+
+- команды `init`, `ask`, `run`, `trace` и `skills`;
+- проектные инструкции `AGENTS.md`;
+- слой контекста с бюджетом и `context_report`;
+- инструмент `read_image` для моделей с vision input;
+- базовые инструменты workspace: `list_files`, `read_file`, `write_file`,
+  `search_code`, `apply_patch`, `run_shell`;
+- discovery project-local skills в `.madharness_mini/skills` и `.agents/skills`;
+- явная активация через `@skill:name`, `@skill/name`, `$name` и похожие фразы;
+- auto-activation через catalog и инструмент `activate_skill`;
+- CLI-диагностика `skills list`, `skills show`, `skills validate`.
+
+В этой ветке ещё нет MCP, субагентов и hooks. Здесь фокус только на skills как
+локальном расширении контекста и workflow-памяти агента.
 
 ## Быстрый запуск
 
@@ -10,7 +45,14 @@
 uv tool install madharness-mini --from git+https://github.com/MADTeacher/madharness-mini.git
 ```
 
-Откройте папку проекта, с которой должен работать агент, и создайте настройку:
+Если терминал после установки не видит команду, обновите shell path и откройте
+терминал заново:
+
+```bash
+uv tool update-shell
+```
+
+Перейдите в корень продукта и создайте локальную настройку:
 
 ```bash
 madharness-mini init \
@@ -19,61 +61,59 @@ madharness-mini init \
   --api-key "ключ-доступа-openrouter"
 ```
 
-Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths` и `allow_shell`. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
+## Минимальный skill
 
-Задайте простой вопрос:
+Создайте файл `.madharness_mini/skills/docs-writer/SKILL.md`:
 
-```bash
-madharness-mini ask "Объясни, что делает этот проект"
+```md
+---
+name: docs-writer
+description: Помогает обновлять README и учебную документацию проекта.
+---
+
+Перед правкой документации прочитай README, docs/README.md и связанные файлы.
+Сохраняй короткий учебный стиль и не добавляй возможности, которых нет в коде.
 ```
 
-Запустите агентский режим для задачи по проекту:
+Проверьте, что harness видит skill:
 
 ```bash
-madharness-mini run "Найди команду для запуска тестов и объясни, что она проверяет"
+madharness-mini skills list
 ```
 
-При необходимости добавьте проектный skill в `.madharness_mini/skills/<name>/SKILL.md` или `.agents/skills/<name>/SKILL.md`. В режиме `run` его можно подключить явно:
+Запустите задачу с явным skill:
 
 ```bash
 madharness-mini run "@skill:docs-writer обнови README"
 ```
 
-Если терминал не находит команду `madharness-mini`, выполните:
+Если skill не выбран явно, в `run` модель увидит компактный catalog и сможет
+сама вызвать `activate_skill`.
 
-```bash
-uv tool update-shell
-```
+## Документация ветки
 
-Потом закройте терминал и откройте его заново.
-
-## Дополнительная документация
-
-- [Возможности харнесса](docs/capabilities.md): режимы, инструменты агента, настройки и ограничения безопасности.
-- [Структура кода](docs/code-overview.md): модули проекта и поток выполнения агентского режима.
-- [Слой контекста](docs/context-layer.md): как собираются сообщения для модели и как расширения добавляют свой контекст.
-- [Agent Skills](docs/agent-skills.md): принцип работы проектных навыков, активация, ресурсы, безопасность и трассы.
-- [План поддержки Agent Skills](docs/agent-skills-plan.html): формат навыков, подключение через контекст и этапы внедрения.
-- [Дорожная карта MCP](docs/mcp-roadmap.md): минимальный stdio MCP-клиент на чистом Python и адаптация MCP tools.
+- [Возможности ветки](docs/capabilities.md)
+- [Структура кода](docs/code-overview.md)
+- [Слой контекста](docs/context-layer.md)
+- [Agent Skills](docs/agent-skills.md)
+- [Инструмент apply_patch](docs/apply-patch.md)
 
 ## Разработка самого проекта
 
-Если вы меняете код `madharness-mini`, запускайте команду из корня этого репозитория через `uv run`, предварительно настроив .env:
-
-```bash
-uv run madharness-mini ask "Объясни, что делает этот проект"
-```
-
-Переустановить харнесс из локального проекта можно с помощью команды:
-
-```bash
-uv tool install --python 3.13 --force .
-```
-
-## Проверка
-
-Для запуска тестов введите следующую команду:
+Если вы меняете код `madharness-mini`, запускайте проверки из корня этого
+репозитория:
 
 ```bash
 uv run -m unittest discover -s tests
 ```
+
+Быстрая ручная проверка CLI:
+
+```bash
+uv run madharness-mini skills validate
+```
+
+## Что дальше
+
+Следующая ветка `05-mcp` добавляет подключение внешних инструментов через
+минимальный stdio MCP-клиент.
