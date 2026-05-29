@@ -1,6 +1,41 @@
 # madharness-mini
 
-`madharness-mini` - это учебный харнесс для работы с ИИ-агентом над разрабатываемым приложением. Проект написан на Python 3.13+, без использования дополнительных пакетов.
+> Учебная ветка: `05-mcp`
+>
+> Тема главы: подключение внешних инструментов через минимальный stdio MCP
+> client без runtime-зависимостей.
+>
+> В этой точке harness умеет читать `.madharness-mini/mcp.json`, запускать
+> явно включённые MCP-серверы, получать `tools/list` и отдавать модели MCP tools
+> как обычные `ToolSpec` с префиксом `mcp__server__tool`.
+>
+> Лабораторные работы: [LABS.md](LABS.md)
+> Предыдущая ветка: `04-Agents-Skills`
+> Следующая ветка: `06-subagents`
+
+`madharness-mini` — учебный минималистичный харнесс для работы кодирующего
+ИИ-агента с локальным программным продуктом. Он показывает, как локальный
+agent loop можно расширить внешними инструментами, не превращая учебный проект
+в тяжёлый SDK.
+
+Проект написан для Python 3.13+ и не имеет runtime-зависимостей. Внутри
+используется OpenAI-совместимый API `/chat/completions`.
+
+## Что есть в этой ветке
+
+- команды `init`, `ask`, `run`, `trace` и `skills`;
+- проектные инструкции `AGENTS.md`;
+- слой контекста с бюджетом и `context_report`;
+- project-local Agent Skills и `activate_skill`;
+- инструмент `read_image` для моделей с vision input;
+- базовые инструменты workspace: `list_files`, `read_file`, `write_file`,
+  `search_code`, `apply_patch`, `run_shell`;
+- пакет `madharness_mini.mcp` со stdio transport, JSON-RPC и provider-ом tools;
+- отдельный файл `.madharness-mini/mcp.json` для MCP-серверов;
+- нормализация MCP `tools/call` в обычное observation harness.
+
+В этой ветке ещё нет субагентов и hooks. MCP здесь изучается как отдельный
+источник инструментов, а не как система оркестрации ролей.
 
 ## Быстрый запуск
 
@@ -10,7 +45,7 @@
 uv tool install madharness-mini --from git+https://github.com/MADTeacher/madharness-mini.git
 ```
 
-Откройте папку проекта, с которой должен работать агент, и создайте настройку:
+Перейдите в корень продукта и создайте локальную настройку:
 
 ```bash
 madharness-mini init \
@@ -19,27 +54,15 @@ madharness-mini init \
   --api-key "ключ-доступа-openrouter"
 ```
 
-Команда создаёт файл `.madharness-mini/config.json`. После инициализации в нём можно поменять настройки проекта: `model`, `base_url`, `api_key`, `temperature`, `max_turns`, `workspace_root`, `protected_paths` и `allow_shell`. Подробнее поля описаны в разделе [Возможности харнесса](docs/capabilities.md#настройки).
-
-Задайте простой вопрос:
+Если терминал после установки не видит команду:
 
 ```bash
-madharness-mini ask "Объясни, что делает этот проект"
+uv tool update-shell
 ```
 
-Запустите агентский режим для задачи по проекту:
+## Подключение MCP-сервера
 
-```bash
-madharness-mini run "Найди команду для запуска тестов и объясни, что она проверяет"
-```
-
-При необходимости добавьте проектный skill в `.madharness_mini/skills/<name>/SKILL.md` или `.agents/skills/<name>/SKILL.md`. В режиме `run` его можно подключить явно:
-
-```bash
-madharness-mini run "@skill:docs-writer обнови README"
-```
-
-Для подключения stdio MCP-сервера добавьте отдельный файл `.madharness-mini/mcp.json`. Например, для Playwright MCP:
+Создайте `.madharness-mini/mcp.json`:
 
 ```json
 {
@@ -55,41 +78,44 @@ madharness-mini run "@skill:docs-writer обнови README"
 }
 ```
 
-Если терминал не находит команду `madharness-mini`, выполните:
+Если файла нет, MCP выключен. Harness запускает только явно включённые серверы.
+Команда и аргументы передаются в `subprocess` списком, без shell-строки.
 
-```bash
-uv tool update-shell
+После `initialize` harness вызывает `tools/list`. Например MCP tool
+`browser_navigate` сервера `playwright` станет tool name:
+
+```text
+mcp__playwright__browser_navigate
 ```
 
-Потом закройте терминал и откройте его заново.
+Для модели это обычный инструмент с JSON Schema, а результат `tools/call`
+приводится к обычному observation.
 
-## Дополнительная документация
+## Документация ветки
 
-- [Возможности харнесса](docs/capabilities.md): режимы, инструменты агента, настройки и ограничения безопасности.
-- [Структура кода](docs/code-overview.md): модули проекта и поток выполнения агентского режима.
-- [Слой контекста](docs/context-layer.md): как собираются сообщения для модели и как расширения добавляют свой контекст.
-- [Agent Skills](docs/agent-skills.md): принцип работы проектных навыков, активация, ресурсы, безопасность и трассы.
-- [План поддержки Agent Skills](docs/agent-skills-plan.html): формат навыков, подключение через контекст и этапы внедрения.
-- [MCP](docs/mcp.md): подключение stdio MCP-серверов, формат `mcp.json`, lifecycle, безопасность и трассы.
+- [Возможности ветки](docs/capabilities.md)
+- [Структура кода](docs/code-overview.md)
+- [Слой контекста](docs/context-layer.md)
+- [Agent Skills](docs/agent-skills.md)
+- [MCP](docs/mcp.md)
+- [Инструмент apply_patch](docs/apply-patch.md)
 
 ## Разработка самого проекта
 
-Если вы меняете код `madharness-mini`, запускайте команду из корня этого репозитория через `uv run`, предварительно настроив .env:
-
-```bash
-uv run madharness-mini ask "Объясни, что делает этот проект"
-```
-
-Переустановить харнесс из локального проекта можно с помощью команды:
-
-```bash
-uv tool install --python 3.13 --force .
-```
-
-## Проверка
-
-Для запуска тестов введите следующую команду:
+Если вы меняете код `madharness-mini`, запускайте проверки из корня этого
+репозитория:
 
 ```bash
 uv run -m unittest discover -s tests
 ```
+
+Быстрая ручная проверка CLI:
+
+```bash
+uv run madharness-mini run "Найди доступные инструменты и объясни, что они делают"
+```
+
+## Что дальше
+
+Следующая ветка `06-subagents` добавляет оркестрацию ролей: parent agent сможет
+делегировать задачи встроенным markdown-субагентам.
