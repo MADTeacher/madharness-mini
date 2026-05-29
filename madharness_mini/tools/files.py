@@ -40,6 +40,10 @@ def read_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         return fail("read_file", err)
     if not path or not path.is_file():
         return fail("read_file", f"not a file: {args['path']}")
+    if ctx.trace and ctx.skill_runtime:
+        event = ctx.skill_runtime.resource_event(path)
+        if event:
+            ctx.trace.write("skill_resource_used", tool="read_file", **event)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     start = max(int(args.get("start", 1)), 1)
     end = min(int(args.get("end", start + 160)), len(lines))

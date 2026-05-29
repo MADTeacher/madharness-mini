@@ -232,6 +232,16 @@ class ToolTests(HarnessTestCase):
         self.assertIn("rm -rf", combined)
         self.assertIn("Do not use run_shell to edit files", combined)
 
+    def test_run_shell_accepts_workspace_relative_cwd(self):
+        cfg = self.make_cfg()
+        (cfg.root / "sub").mkdir()
+
+        obs = ToolRegistry(cfg).call("run_shell", {"command": "pwd", "cwd": "sub"})
+
+        self.assertTrue(obs["ok"])
+        self.assertEqual(obs["cwd"], "sub")
+        self.assertEqual(obs["returncode"], 0)
+
     def test_system_prompt_describes_tool_recovery_rules(self):
         prompt = Path("madharness_mini/prompts/system.md").read_text(encoding="utf-8")
 

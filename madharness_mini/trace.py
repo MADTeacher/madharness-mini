@@ -41,6 +41,15 @@ def summarize_trace(cfg: Config, trace_id: str) -> str:
         if line.strip()
     ]
     tools = [e for e in events if e.get("event") == "tool_observation"]
+    discovered = [
+        e for e in events if e.get("event") == "skills_discovered"
+    ]
+    activated = [
+        e for e in events if e.get("event") == "skill_activated"
+    ]
+    resources = [
+        e for e in events if e.get("event") == "skill_resource_used"
+    ]
     reports = [
         e["context_report"]
         for e in events
@@ -55,6 +64,15 @@ def summarize_trace(cfg: Config, trace_id: str) -> str:
     ]
     if reports:
         lines.append(_summarize_context_report(reports[-1]))
+    if discovered or activated or resources:
+        last_discovered = discovered[-1] if discovered else {}
+        activated_names = sorted({str(event.get("name")) for event in activated})
+        lines.append(
+            "skills: "
+            f"discovered {int(last_discovered.get('count') or 0)}; "
+            f"activated {', '.join(activated_names) if activated_names else 'none'}; "
+            f"resources used {len(resources)}"
+        )
     lines.append(f"result: {result}")
     return "\n".join(lines)
 

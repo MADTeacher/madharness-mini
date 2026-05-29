@@ -24,10 +24,12 @@ class ToolRegistry:
         # используем для регистрации внешних инструментов, не
         # входящих в стандартный набор встроенных инструментов
         providers: Iterable[ToolProvider] | None = None,
+        trace: Any | None = None,
+        skill_runtime: Any | None = None,
     ):
         self.cfg = cfg
         self.policy = Policy(cfg)
-        self.context = ToolContext(cfg, self.policy)
+        self.context = ToolContext(cfg, self.policy, trace, skill_runtime)
         self.providers = [BuiltinToolProvider(), *list(providers or [])]
         self.tools = {}
         for provider in self.providers:

@@ -46,6 +46,22 @@ class Policy:
                 return None, f"protected path: {raw}"
         return path, None
 
+    def skill_root(self, raw: str) -> tuple[Path | None, str | None]:
+        """Проверяем фиксированный каталог навыков внутри workspace.
+
+        Discovery читает только `.madharness_mini/skills` и `.agents/skills`.
+        Эти каталоги не проходят через protected_paths: они не являются целями
+        пользовательских файловых инструментов, но всё равно обязаны оставаться
+        внутри workspace_root.
+        """
+
+        path = (self.root / raw).resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError:
+            return None, f"skill root outside workspace: {raw}"
+        return path, None
+
     def shell_allowed(self, command: str) -> tuple[bool, str]:
         """Решаем, можно ли выполнить одну простую shell-команду в workspace.
 

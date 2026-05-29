@@ -1,12 +1,20 @@
 """Режимы ask (один ответ) и run (цикл с инструментами)."""
 
 import time
+from collections.abc import Iterable
 from typing import Any
 
 from .config import Config
-from .context import ContextFragment, ContextManager
+from .context import ContextFragment, ContextManager, ContextProvider
 from .instructions import load_project_instructions, load_prompt
 from .model import ModelClient, ModelRateLimitError
+from .skills import (
+    SkillCatalogProvider,
+    SkillRuntime,
+    SkillToolProvider,
+    discover_skills,
+    find_explicit_skill_selection,
+)
 from .tools import ToolRegistry
 from .trace import Trace
 from .utils import fail, parse_tool_args
@@ -15,7 +23,11 @@ from .utils import fail, parse_tool_args
 RATE_LIMIT_RETRY_MAX_SECONDS = 60
 
 
-def base_context(cfg: Config, task: str) -> ContextManager:
+def base_context(
+    cfg: Config,
+    task: str,
+    providers: Iterable[ContextProvider] | None = None,
+) -> ContextManager:
     """Готовим слой контекста для ask/run: system, AGENTS.md и задача.
 
     Сам ContextManager не читает файлы и не знает про Config. Loop передаёт ему
@@ -26,6 +38,7 @@ def base_context(cfg: Config, task: str) -> ContextManager:
         task,
         max_tokens=int(cfg.data.get("context_max_tokens", 60000)),
         keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
+        providers=providers,
     )
     system = load_prompt("system")
     project_instructions = load_project_instructions(cfg)
@@ -103,8 +116,46 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
 
     trace = Trace(cfg, "run")
     client = ModelClient(cfg)
-    tools_registry = ToolRegistry(cfg)
-    context = base_context(cfg, task)
+    skill_index = discover_skills(cfg)
+    trace.write(
+        "skills_discovered",
+        count=len(skill_index.skills),
+        names=skill_index.names(),
+        diagnostics=[
+            diagnostic.as_dict(cfg.root) for diagnostic in skill_index.diagnostics
+        ],
+    )
+    explicit_skills = find_explicit_skill_selection(task, set(skill_index.skills))
+    if explicit_skills.unknown:
+        names = ", ".join(explicit_skills.unknown)
+        result = f"error: unknown skill: {names}"
+        trace.write("session_end", result=result)
+        raise RuntimeError(f"unknown skill: {names}")
+
+    skill_runtime = SkillRuntime(cfg, skill_index)
+    context_providers: list[ContextProvider] = []
+    tool_providers = []
+    if explicit_skills.names:
+        trace.write("skills_auto_selection_disabled", reason="explicit skill marker")
+    else:
+        context_providers.append(SkillCatalogProvider(skill_index, cfg.root))
+        tool_providers.append(SkillToolProvider(skill_runtime))
+
+    tools_registry = ToolRegistry(
+        cfg,
+        providers=tool_providers,
+        trace=trace,
+        skill_runtime=skill_runtime,
+    )
+    context = base_context(cfg, task, providers=context_providers)
+    for name in explicit_skills.names:
+        obs = skill_runtime.activate(name, "explicit")
+        if not obs.get("ok"):
+            result = f"error: {obs.get('summary')}"
+            trace.write("session_end", result=result)
+            raise RuntimeError(str(obs.get("summary")))
+        _apply_hidden_observation_effects(context, trace, obs)
+
     for turn in range(int(cfg.data["max_turns"])):
         tool_schemas = tools_registry.schemas()
         messages = context.messages(tool_schemas)
@@ -138,8 +189,24 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")
             followup_messages = obs.pop("_followup_messages", [])
+            _apply_hidden_observation_effects(context, trace, obs)
             trace.write("tool_observation", tool=name, args=args, observation=obs)
             context.record_tool_result(call, obs, followup_messages)
     result = "Agent stopped: max_turns exceeded."
     trace.write("session_end", result=result)
     return result, trace.path
+
+
+def _apply_hidden_observation_effects(
+    context: ContextManager,
+    trace: Trace,
+    observation: dict[str, Any],
+) -> None:
+    """Применяем служебные эффекты tool observation, не отправляя их модели."""
+
+    fragments = observation.pop("_context_fragments", [])
+    for fragment in fragments:
+        context.add_fragment(fragment)
+    skill_event = observation.pop("_skill_event", None)
+    if skill_event:
+        trace.write("skill_activated", **skill_event)

@@ -1,6 +1,7 @@
 """Общий контекст, который получают handlers инструментов."""
 
 from dataclasses import dataclass
+from typing import Any
 
 from ..config import Config
 from ..policy import Policy
@@ -16,3 +17,5 @@ class ToolContext:
 
     cfg: Config
     policy: Policy
+    trace: Any | None = None
+    skill_runtime: Any | None = None

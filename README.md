@@ -33,6 +33,12 @@ madharness-mini ask "Объясни, что делает этот проект"
 madharness-mini run "Найди команду для запуска тестов и объясни, что она проверяет"
 ```
 
+При необходимости добавьте проектный skill в `.madharness_mini/skills/<name>/SKILL.md` или `.agents/skills/<name>/SKILL.md`. В режиме `run` его можно подключить явно:
+
+```bash
+madharness-mini run "@skill:docs-writer обнови README"
+```
+
 Если терминал не находит команду `madharness-mini`, выполните:
 
 ```bash
@@ -46,7 +52,8 @@ uv tool update-shell
 - [Возможности харнесса](docs/capabilities.md): режимы, инструменты агента, настройки и ограничения безопасности.
 - [Структура кода](docs/code-overview.md): модули проекта и поток выполнения агентского режима.
 - [Слой контекста](docs/context-layer.md): как собираются сообщения для модели и как расширения добавляют свой контекст.
-- [Дорожная карта Agents Skills](docs/agents-skills-roadmap.md): формат навыков, подключение через контекст и этапы внедрения.
+- [Agent Skills](docs/agent-skills.md): принцип работы проектных навыков, активация, ресурсы, безопасность и трассы.
+- [План поддержки Agent Skills](docs/agent-skills-plan.html): формат навыков, подключение через контекст и этапы внедрения.
 - [Дорожная карта MCP](docs/mcp-roadmap.md): минимальный stdio MCP-клиент на чистом Python и адаптация MCP tools.
 
 ## Разработка самого проекта
