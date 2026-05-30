@@ -105,7 +105,7 @@ uv run -m unittest discover -s tests
 uv run madharness-mini ask "Объясни, что делает этот проект"
 ```
 
-Локальная переустановка команды:
+Локальная переустановка:
 
 ```bash
 uv tool install --python 3.13 --force .
