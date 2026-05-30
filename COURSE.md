@@ -21,13 +21,13 @@ uv run -m unittest discover -s tests
 
 | Ветка | Глава | Что появляется | Лабораторный фокус |
 | --- | --- | --- | --- |
-| `01-minimalistic-harness` | Минимальный харнесс | CLI, обращения к модели, инструменты, политика, трасса | Понять цикл: модель — инструмент — observation. |
-| `02-AGENTS-md` | Проектные инструкции | `AGENTS.md`, nested rules, `read_image` | Управлять локальными правилами проекта. |
-| `03-Context-Layer` | Слой контекста | `ContextManager`, fragments, budget, `context_report` | Видеть и ограничивать запрос к модели. |
-| `04-Agents-Skills` | Agent Skills | `SKILL.md`, каталог, `activate_skill`, ресурсы | Добавлять рабочие инструкции без кода инструментов. |
-| `05-mcp` | MCP-инструменты | `mcp.json`, stdio-клиент, `tools/list`, `tools/call` | Подключать внешние инструменты как инструменты модели. |
-| `06-subagents` | Субагенты | роли, `delegate_task`, `ask_user`, дочерние трассы | Делегировать задачи с ограниченными полномочиями. |
-| `07-hooks` | Hooks | события жизненного цикла, command hooks, redaction, blocking | Добавлять аудит и проектную политику поверх харнесса. |
+| [`01-minimalistic-harness`](https://github.com/MADTeacher/madharness-mini/tree/01-minimalistic-harness) | Минимальный харнесс | CLI, обращения к модели, инструменты, политика, трасса | Понять цикл: модель — инструмент — observation. |
+| [`02-AGENTS-md`](https://github.com/MADTeacher/madharness-mini/tree/02-AGENTS-md) | Проектные инструкции | `AGENTS.md`, nested rules, `read_image` | Управлять локальными правилами проекта. |
+| [`03-Context-Layer`](https://github.com/MADTeacher/madharness-mini/tree/03-Context-Layer) | Слой контекста | `ContextManager`, fragments, budget, `context_report` | Видеть и ограничивать запрос к модели. |
+| [`04-Agents-Skills`](https://github.com/MADTeacher/madharness-mini/tree/04-Agents-Skills) | Agent Skills | `SKILL.md`, каталог, `activate_skill`, ресурсы | Добавлять рабочие инструкции без кода инструментов. |
+| [`05-mcp`](https://github.com/MADTeacher/madharness-mini/tree/05-mcp) | MCP-инструменты | `mcp.json`, stdio-клиент, `tools/list`, `tools/call` | Подключать внешние инструменты как инструменты модели. |
+| [`06-subagents`](https://github.com/MADTeacher/madharness-mini/tree/06-subagents) | Субагенты | роли, `delegate_task`, `ask_user`, дочерние трассы | Делегировать задачи с ограниченными полномочиями. |
+| [`07-hooks`](https://github.com/MADTeacher/madharness-mini/tree/07-hooks) | Hooks | события жизненного цикла, command hooks, redaction, blocking | Добавлять аудит и проектную политику поверх харнесса. |
 
 ## Формат лабораторных
 

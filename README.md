@@ -14,13 +14,13 @@
 
 | Ветка | Тема | Главный вопрос |
 | --- | --- | --- |
-| `01-minimalistic-harness` | Минимальный харнесс | Как устроить базовый цикл: модель, инструменты, трасса? |
-| `02-AGENTS-md` | Проектные инструкции и изображения | Как добавить локальные правила проекта и vision input? |
-| `03-Context-Layer` | Слой контекста | Что именно модель видит перед каждым вызовом? |
-| `04-Agents-Skills` | Agent Skills | Как подключать рабочие инструкции без изменения ядра? |
-| `05-mcp` | MCP-инструменты | Как превратить внешний stdio MCP-сервер в обычные инструменты модели? |
-| `06-subagents` | Субагенты | Как делегировать задачи ролям с отдельными инструментами и трассами? |
-| `07-hooks` | Hooks | Как добавить проектный аудит и блокировку действий? |
+| [`01-minimalistic-harness`](https://github.com/MADTeacher/madharness-mini/tree/01-minimalistic-harness) | Минимальный харнесс | Как устроить базовый цикл: модель, инструменты, трасса? |
+| [`02-AGENTS-md`](https://github.com/MADTeacher/madharness-mini/tree/02-AGENTS-md) | Проектные инструкции и изображения | Как добавить локальные правила проекта и vision input? |
+| [`03-Context-Layer`](https://github.com/MADTeacher/madharness-mini/tree/03-Context-Layer) | Слой контекста | Что именно модель видит перед каждым вызовом? |
+| [`04-Agents-Skills`](https://github.com/MADTeacher/madharness-mini/tree/04-Agents-Skills) | Agent Skills | Как подключать рабочие инструкции без изменения ядра? |
+| [`05-mcp`](https://github.com/MADTeacher/madharness-mini/tree/05-mcp) | MCP-инструменты | Как превратить внешний stdio MCP-сервер в обычные инструменты модели? |
+| [`06-subagents`](https://github.com/MADTeacher/madharness-mini/tree/06-subagents) | Субагенты | Как делегировать задачи ролям с отдельными инструментами и трассами? |
+| [`07-hooks`](https://github.com/MADTeacher/madharness-mini/tree/07-hooks) | Hooks | Как добавить проектный аудит и блокировку действий? |
 
 Подробная карта курса: [COURSE.md](COURSE.md).
 
