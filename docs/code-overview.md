@@ -23,7 +23,7 @@
 2. `run_agent()` создаёт `Trace`, `ModelClient`, discovery skills и loader субагентов.
 3. `subagents/orchestration.py` вычисляет режим: `off`, `requested`, `auto` или `required`.
 4. Skill catalog или явно выбранный skill добавляется в context.
-5. `base_context()` добавляет встроенный prompt и `AGENTS.md`.
+5. `base_context()` добавляет встроенный prompt и корневой `AGENTS.md`.
 6. `ToolRegistry` получает встроенные tools, `activate_skill`, `delegate_task`
    при разрешённой оркестрации и MCP tools из `mcp.json`.
 7. Parent model loop работает как обычно.
