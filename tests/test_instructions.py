@@ -49,7 +49,7 @@ class InstructionTests(HarnessTestCase):
         self.assertEqual(load_project_instructions(cfg), "")
         self.assertEqual(base_messages(cfg, "hello")[0]["content"], load_prompt("system"))
 
-    def test_nested_agents_md_is_appended_after_root_file(self):
+    def test_nested_agents_md_is_ignored(self):
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name)
         active = root / "services" / "payments"
@@ -67,7 +67,7 @@ class InstructionTests(HarnessTestCase):
 
         instructions = load_project_instructions(cfg)
 
-        self.assertEqual(instructions, "Root rules\n\nService rules\n\nPayment rules")
+        self.assertEqual(instructions, "Root rules")
 
     def test_agents_override_is_ignored(self):
         cfg = self.make_cfg()
