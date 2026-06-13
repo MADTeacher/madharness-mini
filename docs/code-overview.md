@@ -23,7 +23,7 @@
 3. Если пользователь явно указал skill, он активируется до первого model call.
 4. Если явного выбора нет, в контекст добавляется compact catalog, а в registry
    появляется tool `activate_skill`.
-5. `base_context()` добавляет встроенный prompt и `AGENTS.md`.
+5. `base_context()` добавляет встроенный prompt и корневой `AGENTS.md`.
 6. `ToolRegistry` регистрирует встроенные инструменты и skill provider.
 7. `ContextManager.messages()` применяет бюджет и отдаёт messages.
 8. `model_loop.py` отправляет messages и tool schemas в модель.
