@@ -20,7 +20,7 @@
 1. CLI создаёт `Config`.
 2. `run_agent()` создаёт `Trace`, `ModelClient` и запускает discovery skills.
 3. Skill catalog или явно выбранный skill добавляется в context.
-4. `base_context()` добавляет встроенный prompt и `AGENTS.md`.
+4. `base_context()` добавляет встроенный prompt и корневой `AGENTS.md`.
 5. `ToolRegistry` получает встроенные tools, `activate_skill` и MCP tools из
    `.madharness-mini/mcp.json`, если файл есть.
 6. MCP provider запускает включённые stdio servers, вызывает `initialize` и
