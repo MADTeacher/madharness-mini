@@ -24,7 +24,7 @@
 2. `run_agent()` создаёт `Trace` и `HookManager`.
 3. Hooks получают `session_start`.
 4. Загружаются skills, subagents и MCP providers.
-5. `ContextManager` собирает system fragments, `AGENTS.md`, catalog skills и историю.
+5. `ContextManager` собирает system fragments, корневой `AGENTS.md`, catalog skills и историю.
 6. Перед model call вызывается `before_model_call`, после ответа — `after_model_call`.
 7. Если модель вызывает tool, `model_loop.py` вызывает `before_tool_call`.
 8. Если hook блокирует действие, handler не запускается, а модель получает
