@@ -20,7 +20,7 @@
 
 1. `cli.py` читает аргументы и создаёт `Config`.
 2. `run_agent()` создаёт `Trace`, `ModelClient`, `ToolRegistry` и `ContextManager`.
-3. `base_context()` добавляет встроенный prompt и найденные `AGENTS.md` как
+3. `base_context()` добавляет встроенный prompt и корневой `AGENTS.md` как
    закреплённые фрагменты.
 4. `ContextManager.messages()` собирает system/user/history и применяет бюджет.
 5. `model_loop.py` отправляет messages и tool schemas в модель.

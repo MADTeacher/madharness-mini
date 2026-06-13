@@ -30,7 +30,7 @@
 prompt и проектные инструкции `AGENTS.md` сейчас склеиваются в один фрагмент.
 Разделите их на два `ContextFragment` или добавьте другой явный и безопасный
 механизм указания источников, чтобы `context_report` различал
-`madharness_mini/prompts/system.md` и найденные `AGENTS.md`. Формат итоговых
+`madharness_mini/prompts/system.md` и корневой `AGENTS.md`. Формат итоговых
 Chat Completions `messages` при этом должен остаться тем же: несколько system
 фрагментов всё ещё рендерятся в одно `role=system` сообщение.
 
