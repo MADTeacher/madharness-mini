@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Iterable
 from typing import Any
@@ -161,6 +162,14 @@ class ContextManager:
             self.max_tokens
             and current_estimate["request_tokens_estimate"] > self.max_tokens
         )
+        context_packet = _context_packet_report(
+            self.user_task,
+            fragments,
+            entries,
+            entry_indexes,
+            tools,
+            current_estimate,
+        )
         self._last_stats = {
             "context_tokens_estimate": current_estimate["request_tokens_estimate"],
             "messages_tokens_estimate": current_estimate["messages_tokens_estimate"],
@@ -179,6 +188,7 @@ class ContextManager:
             "truncated": truncated,
             "hard_limit_exceeded": hard_limit_exceeded,
             "fragments": [_fragment_report(fragment) for fragment in fragments],
+            "context_packet": context_packet,
             "history": {
                 "total_entries": len(self._history),
                 "rendered_entries": len(entries),
@@ -360,6 +370,179 @@ def _history_entry_report(entry: HistoryEntry, index: int) -> dict[str, Any]:
         "tool_call_ids": sorted(entry.expected_tool_call_ids | entry.seen_tool_call_ids),
         "pending_followups": len(entry.pending_followups),
     }
+
+
+def _context_packet_report(
+    user_task: str,
+    fragments: list[ContextFragment],
+    entries: list[HistoryEntry],
+    entry_indexes: list[int],
+    tools: list[dict[str, Any]] | None,
+    estimate: dict[str, int],
+) -> dict[str, Any]:
+    """Пишем индекс prompt-сборки для будущей тепловой карты без текста prompt."""
+
+    units: list[dict[str, Any]] = []
+    cursor = 0
+
+    for fragment in fragments:
+        cursor = _append_context_unit(
+            units,
+            cursor,
+            unit_id=f"fragment:{fragment.id}",
+            source_type=_fragment_source_type(fragment),
+            source_name=fragment.source,
+            source_ref=fragment.id,
+            payload=fragment.text,
+            included_because=f"{fragment.placement}_fragment",
+            metadata={
+                "placement": fragment.placement,
+                "priority": fragment.priority,
+                "transient": fragment.transient,
+                "chars": len(fragment.text),
+            },
+            confidence=0.95,
+        )
+
+    cursor = _append_context_unit(
+        units,
+        cursor,
+        unit_id="user_task",
+        source_type="user_message",
+        source_name="task",
+        source_ref="user_task",
+        payload=user_task,
+        included_because="current_task",
+        metadata={"chars": len(user_task)},
+        confidence=1.0,
+    )
+
+    for entry, original_index in zip(entries, entry_indexes):
+        for message_index, message in enumerate(entry.rendered_messages()):
+            source_type = _message_source_type(message)
+            role = str(message.get("role") or "")
+            cursor = _append_context_unit(
+                units,
+                cursor,
+                unit_id=f"history:{original_index}:{message_index}",
+                source_type=source_type,
+                source_name=role or entry.kind,
+                source_ref=f"history[{original_index}].messages[{message_index}]",
+                payload=message,
+                included_because="rendered_history",
+                metadata={
+                    "history_index": original_index,
+                    "history_kind": entry.kind,
+                    "role": role,
+                    "tool_call_id": str(message.get("tool_call_id") or ""),
+                    "tool_call_ids": sorted(
+                        entry.expected_tool_call_ids | entry.seen_tool_call_ids
+                    ),
+                },
+                confidence=0.9,
+            )
+
+    for tool_index, tool in enumerate(tools or []):
+        function = tool.get("function") if isinstance(tool, dict) else {}
+        name = ""
+        if isinstance(function, dict):
+            name = str(function.get("name") or "")
+        cursor = _append_context_unit(
+            units,
+            cursor,
+            unit_id=f"tool_schema:{name or tool_index}",
+            source_type="tool_schema",
+            source_name=name or "tool_schema",
+            source_ref=f"tools[{tool_index}]",
+            payload=tool,
+            included_because="available_tool_schema",
+            metadata={"tool_index": tool_index},
+            confidence=0.85,
+        )
+
+    warnings: list[str] = []
+    if units and cursor != estimate["request_tokens_estimate"]:
+        warnings.append("token_positions_are_estimates")
+    return {
+        "version": 1,
+        "token_count_method": "char_estimate",
+        "position_method": "estimated_sequential_units",
+        "messages_tokens_estimate": estimate["messages_tokens_estimate"],
+        "tools_tokens_estimate": estimate["tools_tokens_estimate"],
+        "request_tokens_estimate": estimate["request_tokens_estimate"],
+        "units": units,
+        "warnings": warnings,
+    }
+
+
+def _append_context_unit(
+    units: list[dict[str, Any]],
+    cursor: int,
+    *,
+    unit_id: str,
+    source_type: str,
+    source_name: str,
+    source_ref: str,
+    payload: Any,
+    included_because: str,
+    metadata: dict[str, Any],
+    confidence: float,
+) -> int:
+    """Добавляем один элемент prompt-индекса и возвращаем следующую позицию."""
+
+    tokens = estimate_tokens(payload)
+    end = cursor + tokens
+    units.append(
+        {
+            "unit_id": unit_id,
+            "source_type": source_type,
+            "source_name": source_name,
+            "source_ref": source_ref,
+            "tokens_estimate": tokens,
+            "position_start": cursor,
+            "position_end": end,
+            "included_because": included_because,
+            "content_hash": _content_hash(payload),
+            "confidence": confidence,
+            "metadata": metadata,
+        }
+    )
+    return end
+
+
+def _content_hash(payload: Any) -> str:
+    """Хэшируем содержимое, не записывая сам текст в trace."""
+
+    rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+
+
+def _fragment_source_type(fragment: ContextFragment) -> str:
+    """Грубо классифицируем закреплённые фрагменты для аналитики контекста."""
+
+    value = f"{fragment.id} {fragment.source}".lower()
+    if "system" in value:
+        return "system_instruction"
+    if "agents" in value or "project" in value or "instruction" in value:
+        return "developer_instruction"
+    if "skill" in value:
+        return "developer_instruction"
+    return "context_fragment"
+
+
+def _message_source_type(message: dict[str, Any]) -> str:
+    """Преобразуем Chat role в тип фрагмента тепловой карты."""
+
+    role = str(message.get("role") or "")
+    if role == "assistant":
+        return "assistant_message"
+    if role == "tool":
+        return "tool_output"
+    if role == "user":
+        return "user_message"
+    if role == "system":
+        return "system_instruction"
+    return "unknown"
 
 
 def _tool_name(call: dict[str, Any], observation: dict[str, Any]) -> str:

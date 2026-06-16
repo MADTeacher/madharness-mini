@@ -15,6 +15,7 @@ from .model_loop import (
     call_model_with_rate_limit_retry,
     emit_session_error,
     model_message_summary,
+    model_response_summary,
     run_model_loop,
     safe_context_report,
 )
@@ -67,20 +68,44 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
         emit_session_error(hooks, "ask", exc)
         raise
     context_report = context.report()
-    trace.write("model_call_started", tools_count=0, context_report=context_report)
+    model_call_id = f"{trace.id}:0"
+    trace.write(
+        "model_call_started",
+        turn=0,
+        model_call_id=model_call_id,
+        tools_count=0,
+        context_report=context_report,
+    )
     hooks.emit(
         "before_model_call",
         kind="ask",
-        data={"tools_count": 0, "context_report": context_report},
+        data={
+            "turn": 0,
+            "model_call_id": model_call_id,
+            "tools_count": 0,
+            "context_report": context_report,
+        },
     )
     try:
-        raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
+        raw = call_model_with_rate_limit_retry(
+            ModelClient(cfg),
+            trace,
+            messages,
+            turn=0,
+            model_call_id=model_call_id,
+        )
     except RuntimeError as exc:
         trace.write("model_error", error=str(exc))
         trace.write("session_end", result=f"error: {exc}")
         emit_session_error(hooks, "ask", exc)
         raise
-    trace.write("model_call_finished", raw=raw)
+    trace.write(
+        "model_call_finished",
+        turn=0,
+        model_call_id=model_call_id,
+        model_response=model_response_summary(raw),
+        raw=raw,
+    )
     message = raw["choices"][0]["message"]
     hooks.emit(
         "after_model_call",

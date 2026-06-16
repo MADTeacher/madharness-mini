@@ -244,3 +244,56 @@ class ContextManagerTests(HarnessTestCase):
         )
         self.assertTrue(report["over_budget"])
         self.assertTrue(report["hard_limit_exceeded"])
+
+    def test_report_includes_context_packet_without_prompt_text(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.add_fragment(ContextFragment("system", "test-system", "system rules"))
+        call = tool_call("call_context_packet", "run_shell")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {
+                "ok": True,
+                "tool": "run_shell",
+                "summary": "ran command",
+                "stdout": "secret-free output " + "x" * 1000,
+            },
+        )
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_shell",
+                    "description": "Run command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        ctx.messages(tools)
+        packet = ctx.report()["context_packet"]
+        units = packet["units"]
+        positions = [(unit["position_start"], unit["position_end"]) for unit in units]
+        rendered = json.dumps(packet, ensure_ascii=False)
+
+        self.assertEqual(packet["version"], 1)
+        self.assertIn("token_positions_are_estimates", packet["warnings"])
+        self.assertTrue(any(unit["source_type"] == "tool_schema" for unit in units))
+        self.assertEqual(positions, sorted(positions))
+        for unit in units:
+            self.assertEqual(len(unit["content_hash"]), 16)
+            self.assertGreaterEqual(unit["confidence"], 0.0)
+            self.assertLessEqual(unit["confidence"], 1.0)
+        tool_schema = next(unit for unit in units if unit["source_type"] == "tool_schema")
+        self.assertEqual(tool_schema["source_ref"], "tools[0]")
+        self.assertEqual(tool_schema["confidence"], 0.85)
+        self.assertEqual(
+            [unit["content_hash"] for unit in units],
+            [
+                unit["content_hash"]
+                for unit in ctx.report()["context_packet"]["units"]
+            ],
+        )
+        self.assertNotIn("system rules", rendered)
+        self.assertNotIn("secret-free output", rendered)
+        self.assertNotIn("x" * 100, rendered)

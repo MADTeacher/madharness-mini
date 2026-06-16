@@ -8,6 +8,7 @@ dependencies = []
 
 [project.scripts]
 madharness-mini = "madharness_mini.__main__:main"
+context-heatmap = "context_heatmap.cli:main"
 
 [build-system]
 requires = ["hatchling"]

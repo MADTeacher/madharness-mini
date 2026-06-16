@@ -1,0 +1,172 @@
+"""JSON-friendly схемы анализатора тепловой карты контекста."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+
+JsonDict = dict[str, Any]
+
+
+@dataclass
+class SessionEvent:
+    """Нормализованное событие из trace harness."""
+
+    event_id: str
+    session_id: str
+    turn_id: int
+    timestamp: float | None
+    event_type: str
+    actor: str
+    payload: JsonDict
+    raw_ref: JsonDict
+    confidence: float = 1.0
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для JSONL."""
+
+        return asdict(self)
+
+
+@dataclass
+class ContextFragmentRecord:
+    """Фрагмент, который был или мог быть частью prompt-пакета."""
+
+    fragment_id: str
+    session_id: str
+    source_type: str
+    source_name: str
+    tokens: int
+    token_count_method: str
+    trust: str = "unknown"
+    taint: str = "none"
+    validity: str = "unknown"
+    target_paths: list[str] = field(default_factory=list)
+    created_by_event_id: str = ""
+    content_hash: str = ""
+    content_excerpt_redacted: str = ""
+    metadata: JsonDict = field(default_factory=dict)
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для JSONL."""
+
+        return asdict(self)
+
+
+@dataclass
+class PacketFragment:
+    """Позиция фрагмента внутри одного запроса модели."""
+
+    fragment_id: str
+    position_start: int
+    position_end: int
+    tokens: int
+    source_type: str
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для вложенного JSON."""
+
+        return asdict(self)
+
+
+@dataclass
+class ContextPacketRecord:
+    """Один prompt-пакет перед обращением к модели."""
+
+    model_call_id: str
+    session_id: str
+    turn_id: int
+    input_tokens: int
+    context_window_tokens: int
+    fragments: list[PacketFragment]
+    reconstruction_confidence: float
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для JSONL."""
+
+        data = asdict(self)
+        data["fragments"] = [fragment.to_dict() for fragment in self.fragments]
+        return data
+
+
+@dataclass
+class FragmentHeatRecord:
+    """Оценка heat для одного фрагмента в одном prompt-пакете."""
+
+    session_id: str
+    model_call_id: str
+    fragment_id: str
+    heat: float
+    confidence: float
+    axes: JsonDict
+    reasons: list[str]
+    evidence_event_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для JSONL."""
+
+        return asdict(self)
+
+
+@dataclass
+class TurnHeatRecord:
+    """Агрегаты нагрева на уровне обращения к модели."""
+
+    session_id: str
+    model_call_id: str
+    turn_id: int
+    red_token_share: float
+    stale_token_share: float
+    raw_tool_share: float
+    active_path_purity: float
+    evidence_density: float
+    cold_gap_score: float
+    positioned_evidence_score: float
+    growth_slope: float
+    taint_exposure: float
+    top_reasons: list[str]
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для JSONL."""
+
+        return asdict(self)
+
+
+@dataclass
+class Finding:
+    """Человечески читаемое предупреждение с причиной и рекомендацией."""
+
+    finding_id: str
+    session_id: str
+    turn_id: int
+    severity: str
+    kind: str
+    title: str
+    explanation: str
+    fragment_ids: list[str]
+    event_ids: list[str]
+    recommendation: str
+    confidence: float
+    scores: JsonDict = field(default_factory=dict)
+
+    def to_dict(self) -> JsonDict:
+        """Возвращаем форму для JSONL."""
+
+        return asdict(self)
+
+
+@dataclass
+class AnalysisResult:
+    """Полный результат анализа одной сессии."""
+
+    session_id: str
+    events: list[SessionEvent]
+    fragments: list[ContextFragmentRecord]
+    packets: list[ContextPacketRecord]
+    fragment_heat: list[FragmentHeatRecord]
+    turn_heat: list[TurnHeatRecord]
+    findings: list[Finding]
+    warnings: list[JsonDict]
+    session_report: JsonDict

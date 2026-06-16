@@ -154,9 +154,12 @@ class ModelLoopTests(HarnessTestCase):
         ]
         started = next(event for event in events if event["event"] == "model_call_started")
         report = started["context_report"]
+        finished = next(event for event in events if event["event"] == "model_call_finished")
         self.assertIsInstance(report["request_tokens_estimate"], int)
         self.assertEqual(report["tools_tokens_estimate"], 0)
         self.assertEqual(report["history"]["total_entries"], 0)
+        self.assertEqual(started["model_call_id"], finished["model_call_id"])
+        self.assertEqual(finished["model_response"]["prompt_tokens"], None)
         summary = summarize_trace(cfg, Path(trace_path).stem)
         self.assertIn("context:", summary)
         self.assertIn("estimated tokens", summary)

@@ -73,9 +73,11 @@ def run_model_loop(
             emit_session_error(hooks, kind, exc, turn=turn)
             raise
         context_report = context.report()
+        model_call_id = f"{trace.id}:{turn}"
         trace.write(
             "model_call_started",
             turn=turn,
+            model_call_id=model_call_id,
             tools_count=len(tool_schemas),
             context_report=context_report,
         )
@@ -85,13 +87,19 @@ def run_model_loop(
             kind=kind,
             data={
                 "turn": turn,
+                "model_call_id": model_call_id,
                 "tools_count": len(tool_schemas),
                 "context_report": context_report,
             },
         )
         try:
             raw = call_model_with_rate_limit_retry(
-                client, trace, messages, tool_schemas, turn=turn
+                client,
+                trace,
+                messages,
+                tool_schemas,
+                turn=turn,
+                model_call_id=model_call_id,
             )
         except RuntimeError as exc:
             trace.write("model_error", turn=turn, error=str(exc))
@@ -99,7 +107,13 @@ def run_model_loop(
             emit_session_error(hooks, kind, exc, turn=turn)
             raise
         message = raw["choices"][0]["message"]
-        trace.write("model_call_finished", turn=turn, message=message)
+        trace.write(
+            "model_call_finished",
+            turn=turn,
+            model_call_id=model_call_id,
+            model_response=model_response_summary(raw),
+            message=message,
+        )
         emit_hook(
             hooks,
             "after_model_call",
@@ -277,6 +291,33 @@ def model_message_summary(message: dict[str, Any]) -> dict[str, Any]:
         "tool_calls_count": len(calls),
         "tools": tools,
     }
+
+
+def model_response_summary(raw: dict[str, Any]) -> dict[str, Any]:
+    """Сохраняем компактную телеметрию ответа модели для анализа trace."""
+
+    usage = raw.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    return {
+        "id": str(raw.get("id") or ""),
+        "model": str(raw.get("model") or ""),
+        "provider": str(raw.get("provider") or ""),
+        "prompt_tokens": _optional_int(usage.get("prompt_tokens")),
+        "completion_tokens": _optional_int(usage.get("completion_tokens")),
+        "total_tokens": _optional_int(usage.get("total_tokens")),
+    }
+
+
+def _optional_int(value: Any) -> int | None:
+    """Аккуратно приводим usage поля провайдера к int, если это возможно."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def apply_hidden_observation_effects(
