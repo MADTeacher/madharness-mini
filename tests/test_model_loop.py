@@ -8,7 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from madharness_mini.loop import ask, run_agent
-from madharness_mini.model import ModelClient, ModelRateLimitError, parse_retry_after
+from madharness_mini.model import (
+    ModelClient,
+    ModelRateLimitError,
+    ModelTransientError,
+    parse_retry_after,
+)
 from madharness_mini.trace import Trace, summarize_trace
 
 from tests.helpers import HarnessTestCase
@@ -74,6 +79,17 @@ class ModelLoopTests(HarnessTestCase):
         self.assertEqual(exc.retry_after, "3")
         self.assertEqual(exc.retry_after_seconds, 3)
 
+    def test_model_client_wraps_url_errors_as_transient_errors(self):
+        cfg = self.make_cfg()
+        cfg.data["api_key"] = "token"
+
+        with patch(
+            "madharness_mini.model.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("tls eof"),
+        ):
+            with self.assertRaisesRegex(ModelTransientError, "tls eof"):
+                ModelClient(cfg).chat([{"role": "user", "content": "hello"}])
+
     def test_ask_retries_once_after_short_rate_limit(self):
         cfg = self.make_cfg()
         rate_limit = ModelRateLimitError(
@@ -97,6 +113,56 @@ class ModelLoopTests(HarnessTestCase):
             for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
         ]
         self.assertIn("model_rate_limit_retry", [event["event"] for event in events])
+
+    def test_ask_retries_transient_model_errors(self):
+        cfg = self.make_cfg()
+        transient = ModelTransientError("temporary tls eof")
+        raw = {"choices": [{"message": {"content": "ok"}}]}
+
+        with (
+            patch("madharness_mini.loop.ModelClient.chat", side_effect=[transient, raw]),
+            patch("madharness_mini.model_loop.time.sleep") as sleep,
+        ):
+            result, trace_path = ask("hello", cfg)
+
+        self.assertEqual(result, "ok")
+        sleep.assert_called_once_with(1)
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertIn("model_transient_retry", [event["event"] for event in events])
+
+    def test_ask_traces_error_after_transient_retries_are_exhausted(self):
+        cfg = self.make_cfg()
+        transient = ModelTransientError("temporary tls eof")
+
+        with (
+            patch("madharness_mini.loop.ModelClient.chat", side_effect=transient),
+            patch("madharness_mini.model_loop.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "temporary tls eof"):
+                ask("hello", cfg)
+
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 3])
+        traces = sorted((cfg.state_dir / "traces").glob("*.jsonl"))
+        self.assertEqual(len(traces), 1)
+        events = [
+            json.loads(line)
+            for line in traces[0].read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [event["event"] for event in events if event["event"] == "model_transient_retry"],
+            ["model_transient_retry", "model_transient_retry"],
+        )
+        self.assertTrue(any(event["event"] == "model_error" for event in events))
+        self.assertTrue(
+            any(
+                event["event"] == "session_end"
+                and "temporary tls eof" in str(event.get("result"))
+                for event in events
+            )
+        )
 
     def test_ask_fails_when_rate_limit_retry_after_is_too_long(self):
         cfg = self.make_cfg()

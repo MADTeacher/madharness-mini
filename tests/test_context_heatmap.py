@@ -77,6 +77,7 @@ def _tool_event(
     order: int,
     tool: str,
     args: dict,
+    observation: dict | None = None,
 ) -> SessionEvent:
     return SessionEvent(
         event_id=event_id,
@@ -85,7 +86,11 @@ def _tool_event(
         timestamp=float(order),
         event_type="tool_result",
         actor="tool",
-        payload={"tool": tool, "args": args, "observation": {"ok": True}},
+        payload={
+            "tool": tool,
+            "args": args,
+            "observation": observation or {"ok": True},
+        },
         raw_ref={"file": "synthetic.jsonl", "line": order, "offset": None},
     )
 
@@ -228,6 +233,11 @@ class ContextHeatmapTests(HarnessTestCase):
         self.assertIn("tainted_or_untrusted", secret_reasons)
 
     def test_cold_gaps_use_event_order_and_patch_paths(self):
+        initial_create = [
+            _tool_event("s1:evt-000001", 1, "write_file", {"path": "new.py"}),
+        ]
+        self.assertEqual(detect_cold_gaps(initial_create), [])
+
         safe_events = [
             _tool_event("s1:evt-000001", 1, "read_file", {"path": "app.py"}),
             _tool_event(
@@ -240,13 +250,26 @@ class ContextHeatmapTests(HarnessTestCase):
         self.assertEqual(detect_cold_gaps(safe_events), [])
 
         repeated_write = [
-            _tool_event("s1:evt-000001", 1, "read_file", {"path": "app.py"}),
+            _tool_event("s1:evt-000001", 1, "write_file", {"path": "app.py"}),
             _tool_event("s1:evt-000002", 2, "write_file", {"path": "app.py"}),
-            _tool_event("s1:evt-000003", 3, "write_file", {"path": "app.py"}),
         ]
         repeated_findings = detect_cold_gaps(repeated_write)
         self.assertEqual(len(repeated_findings), 1)
-        self.assertEqual(repeated_findings[0].event_ids, ["s1:evt-000003"])
+        self.assertEqual(repeated_findings[0].event_ids, ["s1:evt-000002"])
+
+        known_existing_write = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "list_files",
+                {"path": "."},
+                {"ok": True, "files": ["app.py"]},
+            ),
+            _tool_event("s1:evt-000002", 2, "write_file", {"path": "app.py"}),
+        ]
+        known_findings = detect_cold_gaps(known_existing_write)
+        self.assertEqual(len(known_findings), 1)
+        self.assertEqual(known_findings[0].event_ids, ["s1:evt-000002"])
 
         patch = "\n".join(
             [
@@ -266,9 +289,11 @@ class ContextHeatmapTests(HarnessTestCase):
             [_tool_event("s1:evt-000004", 4, "apply_patch", {"patch": patch})]
         )
         explanations = "\n".join(finding.explanation for finding in findings)
-        self.assertEqual(len(findings), 4)
-        for path in ("a.py", "b.py", "c.py", "moved.py"):
+        self.assertEqual(len(findings), 2)
+        for path in ("a.py", "c.py"):
             self.assertIn(path, explanations)
+        self.assertNotIn("b.py", explanations)
+        self.assertNotIn("moved.py", explanations)
 
     def test_analyze_writes_outputs_and_renders_html_without_secret(self):
         cfg = self.make_cfg()
@@ -426,6 +451,191 @@ class ContextHeatmapTests(HarnessTestCase):
         self.assertIn("&lt;b&gt;bad&lt;/b&gt;", html)
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertNotIn("<img src=x>", html)
+
+    def test_html_labels_tool_schema_fragments_by_tool_name(self):
+        cfg = self.make_cfg()
+        out_dir = Path(cfg.root) / "html-tool-labels"
+        out_dir.mkdir()
+        (out_dir / "session_report.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "model_calls": 1,
+                    "max_red_token_share": 0,
+                    "max_cold_gap_score": 0,
+                    "findings": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (out_dir / "fragment_heat.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "session_id": "s1",
+                            "model_call_id": "s1:0",
+                            "fragment_id": "frag-tool_output-history-0--messages-1--ghi789",
+                            "heat": 0.4,
+                            "confidence": 0.9,
+                            "axes": {},
+                            "reasons": ["tainted_or_untrusted"],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "session_id": "s1",
+                            "model_call_id": "s1:0",
+                            "fragment_id": "frag-tool_schema-tools-4--abc123",
+                            "heat": 0.2,
+                            "confidence": 0.85,
+                            "axes": {},
+                            "reasons": ["tool_schema_budget"],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "session_id": "s1",
+                            "model_call_id": "s1:0",
+                            "fragment_id": "frag-assistant_message-history-0--messages-0--jkl012",
+                            "heat": 0.1,
+                            "confidence": 0.9,
+                            "axes": {},
+                            "reasons": [],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "session_id": "s1",
+                            "model_call_id": "s1:0",
+                            "fragment_id": "frag-user_message-user-task-def456",
+                            "heat": 0.3,
+                            "confidence": 1.0,
+                            "axes": {},
+                            "reasons": ["large_or_repeated_fragment"],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "session_id": "s1",
+                            "model_call_id": "s1:0",
+                            "fragment_id": "frag-system_instruction-system-mno345",
+                            "heat": 0.05,
+                            "confidence": 0.95,
+                            "axes": {},
+                            "reasons": [],
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (out_dir / "fragments.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "fragment_id": "frag-tool_output-history-0--messages-1--ghi789",
+                            "source_type": "tool_output",
+                            "source_name": "tool",
+                            "metadata": {
+                                "source_ref": "history[0].messages[1]",
+                                "tool_call_id": "call_read_123",
+                                "history_index": 0,
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "fragment_id": "frag-tool_schema-tools-4--abc123",
+                            "source_type": "tool_schema",
+                            "source_name": "apply_patch",
+                            "metadata": {
+                                "source_ref": "tools[4]",
+                                "tool_index": 4,
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "fragment_id": "frag-assistant_message-history-0--messages-0--jkl012",
+                            "source_type": "assistant_message",
+                            "source_name": "assistant",
+                            "metadata": {
+                                "source_ref": "history[0].messages[0]",
+                                "history_index": 0,
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "fragment_id": "frag-user_message-user-task-def456",
+                            "source_type": "user_message",
+                            "source_name": "task",
+                            "metadata": {"source_ref": "user_task"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "fragment_id": "frag-system_instruction-system-mno345",
+                            "source_type": "system_instruction",
+                            "source_name": "system",
+                            "metadata": {"source_ref": "system"},
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (out_dir / "events.jsonl").write_text(
+            json.dumps(
+                {
+                    "event_type": "model_output",
+                    "payload": {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_read_123",
+                                    "function": {"name": "read_file"},
+                                }
+                            ]
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (out_dir / "turn_heat.jsonl").write_text("", encoding="utf-8")
+        (out_dir / "findings.jsonl").write_text("", encoding="utf-8")
+
+        render_html_report(out_dir / "session_report.json", out_dir / "heatmap.html")
+        html = (out_dir / "heatmap.html").read_text(encoding="utf-8")
+
+        self.assertIn("tool_schema: apply_patch", html)
+        self.assertIn("tools[4]", html)
+        self.assertIn("user_message: task", html)
+        self.assertIn("user_task", html)
+        self.assertIn("tool_output: read_file", html)
+        self.assertIn("tool=read_file", html)
+        self.assertLess(
+            html.index("system_instruction: system"),
+            html.index("user_message: task"),
+        )
+        self.assertLess(
+            html.index("user_message: task"),
+            html.index("tool_schema: apply_patch"),
+        )
+        self.assertLess(
+            html.index("tool_schema: apply_patch"),
+            html.index("assistant_message: assistant"),
+        )
+        self.assertLess(
+            html.index("assistant_message: assistant"),
+            html.index("tool_output: read_file"),
+        )
 
     def test_normalized_events_round_trip(self):
         cfg = self.make_cfg()

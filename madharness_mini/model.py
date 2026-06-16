@@ -34,6 +34,13 @@ class ModelRateLimitError(RuntimeError):
         super().__init__(message)
 
 
+class ModelTransientError(RuntimeError):
+    """Временный сетевой сбой при обращении к LLM API."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 def parse_retry_after(value: str | None) -> int | None:
     """Переводим заголовок Retry-After в секунды ожидания.
 
@@ -129,3 +136,9 @@ class ModelClient:
                     retry_after_seconds=parse_retry_after(retry_after),
                 ) from exc
             raise RuntimeError(f"LLM API HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise ModelTransientError(
+                f"временный сетевой сбой LLM API: {exc.reason}"
+            ) from exc
+        except TimeoutError as exc:
+            raise ModelTransientError(f"таймаут LLM API: {exc}") from exc

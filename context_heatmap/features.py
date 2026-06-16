@@ -75,6 +75,7 @@ def detect_cold_gaps(events: list[SessionEvent]) -> list[Finding]:
 
     reads_by_path: dict[str, list[int]] = defaultdict(list)
     writes_by_path: dict[str, list[int]] = defaultdict(list)
+    known_existing_paths: set[str] = set()
     findings: list[Finding] = []
     counter = 1
     for event_order, event in enumerate(events):
@@ -84,16 +85,25 @@ def detect_cold_gaps(events: list[SessionEvent]) -> list[Finding]:
         args = event.payload.get("args")
         if not isinstance(args, dict):
             continue
+        observation = event.payload.get("observation")
+        if tool == "list_files" and isinstance(observation, dict):
+            known_existing_paths.update(
+                str(path)
+                for path in observation.get("files") or []
+                if isinstance(path, str)
+            )
         if tool == "read_file" and isinstance(args.get("path"), str):
             reads_by_path[args["path"]].append(event_order)
-        for path in _write_paths(tool, args):
+            known_existing_paths.add(args["path"])
+        for path, requires_read in _write_operations(tool, args, known_existing_paths):
             previous_write = max(writes_by_path[path], default=-1)
             has_current_read = any(
                 previous_write < read_order < event_order
                 for read_order in reads_by_path.get(path, [])
             )
             writes_by_path[path].append(event_order)
-            if has_current_read:
+            known_existing_paths.add(path)
+            if has_current_read or not requires_read:
                 continue
             findings.append(
                 Finding(
@@ -121,19 +131,36 @@ def detect_cold_gaps(events: list[SessionEvent]) -> list[Finding]:
     return findings
 
 
-def _write_paths(tool: str, args: dict[str, Any]) -> list[str]:
+def _write_operations(
+    tool: str,
+    args: dict[str, Any],
+    known_existing_paths: set[str],
+) -> list[tuple[str, bool]]:
+    """Возвращаем path и признак, нужен ли актуальный `read_file`.
+
+    Первичное создание файла не является cold gap: читать ещё нечего. А вот
+    повторная запись, известный существующий файл, Update/Delete patch и source
+    при Move требуют доказательства свежего состояния.
+    """
+
     if tool == "write_file" and isinstance(args.get("path"), str):
-        return [args["path"]]
+        path = args["path"]
+        return [(path, path in known_existing_paths)]
     if tool != "apply_patch" or not isinstance(args.get("patch"), str):
         return []
-    paths: list[str] = []
-    pattern = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$")
+    operations: list[tuple[str, bool]] = []
+    pattern = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$")
     move_pattern = re.compile(r"^\*\*\* Move to: (.+)$")
     for line in args["patch"].splitlines():
-        match = pattern.match(line) or move_pattern.match(line)
+        match = pattern.match(line)
         if match:
-            paths.append(match.group(1).strip())
-    return sorted(set(paths))
+            operation, path = match.groups()
+            operations.append((path.strip(), operation in {"Update", "Delete"}))
+            continue
+        move_match = move_pattern.match(line)
+        if move_match:
+            operations.append((move_match.group(1).strip(), False))
+    return sorted(set(operations))
 
 
 def _low_utility(fragment: ContextFragmentRecord) -> float:

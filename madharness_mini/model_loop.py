@@ -7,13 +7,17 @@ from typing import Any
 
 from .context import ContextManager
 from .hooks import HookDecision, HookManager
-from .model import ModelClient, ModelRateLimitError
+from .model import ModelClient, ModelRateLimitError, ModelTransientError
 from .tools import ToolRegistry
 from .trace import Trace
 from .utils import fail, parse_tool_args
 
 # При 429 ждём Retry-After, но не дольше этой границы (секунды).
 RATE_LIMIT_RETRY_MAX_SECONDS = 60
+
+# Временные сетевые сбои провайдера повторяем коротко, чтобы не терять сессию
+# из-за разового TLS/EOF/timeout, но и не зависать надолго в учебном CLI.
+TRANSIENT_RETRY_DELAYS_SECONDS = (1, 3)
 
 
 def call_model_with_rate_limit_retry(
@@ -29,7 +33,7 @@ def call_model_with_rate_limit_retry(
     """
 
     try:
-        return client.chat(messages, tools)
+        return _call_model_with_transient_retry(client, trace, messages, tools, trace_data)
     except ModelRateLimitError as exc:
         wait_seconds = exc.retry_after_seconds
         if wait_seconds is not None and 0 < wait_seconds <= RATE_LIMIT_RETRY_MAX_SECONDS:
@@ -41,8 +45,40 @@ def call_model_with_rate_limit_retry(
                 retry_after_seconds=wait_seconds,
             )
             time.sleep(wait_seconds)
-            return client.chat(messages, tools)
+            return _call_model_with_transient_retry(
+                client,
+                trace,
+                messages,
+                tools,
+                trace_data,
+            )
         raise
+
+
+def _call_model_with_transient_retry(
+    client: ModelClient,
+    trace: Trace,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    trace_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Повторяем короткие сетевые сбои и пишем каждую попытку в trace."""
+
+    for attempt, delay in enumerate((*TRANSIENT_RETRY_DELAYS_SECONDS, None), 1):
+        try:
+            return client.chat(messages, tools)
+        except ModelTransientError as exc:
+            if delay is None:
+                raise
+            trace.write(
+                "model_transient_retry",
+                **trace_data,
+                attempt=attempt,
+                retry_after_seconds=delay,
+                error=str(exc),
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable transient retry state")
 
 
 def run_model_loop(
