@@ -5,9 +5,12 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 from .schema import ContextFragmentRecord, ContextPacketRecord, Finding, SessionEvent
+
+PROTECTED_RED_THRESHOLD = 0.75
 
 
 def clamp(value: float) -> float:
@@ -16,14 +19,131 @@ def clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+@dataclass(frozen=True)
+class FragmentScore:
+    """Расширенная оценка фрагмента с совместимым tuple-интерфейсом."""
+
+    axes: dict[str, float]
+    heat: float
+    reasons: list[str]
+    confidence: float
+    ordinary_cost: float
+    protected_status: float
+    excluded_from_red_token_share: bool
+    protected_reasons: list[str]
+    context_layer: str
+    authority_level: str
+    color: str
+
+    def __iter__(self):
+        """Сохраняем старое распаковывание: axes, heat, reasons, confidence."""
+
+        yield self.axes
+        yield self.heat
+        yield self.reasons
+        yield self.confidence
+
+
 def score_fragment(
     fragment: ContextFragmentRecord,
     packet: ContextPacketRecord,
     active_hash_counts: Counter[str],
     recent_counts: Counter[str],
     growth_slope: float,
-) -> tuple[dict[str, float], float, list[str], float]:
+) -> FragmentScore:
     """Считает оси и итоговый heat для одного фрагмента."""
+
+    axes, ordinary_heat, ordinary_reasons, confidence = _ordinary_score_fragment(
+        fragment,
+        packet,
+        active_hash_counts,
+        recent_counts,
+        growth_slope,
+    )
+    context_layer = fragment.context_layer or "unknown"
+    authority_level = fragment.authority_level or "unknown"
+    if context_layer == "normative":
+        protected_axes = _normative_scores(fragment, active_hash_counts)
+        protected_status = max(protected_axes.values(), default=0.0)
+        protected_reasons = _protected_reasons(protected_axes)
+        heat = protected_status
+        excluded = protected_status < PROTECTED_RED_THRESHOLD
+        reasons = list(protected_reasons)
+        if not reasons and ordinary_heat >= 0.25:
+            reasons.append("protected_context_cost")
+        axes.update(protected_axes)
+        return FragmentScore(
+            axes=axes,
+            heat=heat,
+            reasons=reasons,
+            confidence=confidence,
+            ordinary_cost=ordinary_heat,
+            protected_status=protected_status,
+            excluded_from_red_token_share=excluded,
+            protected_reasons=protected_reasons,
+            context_layer=context_layer,
+            authority_level=authority_level,
+            color=_protected_color(context_layer, ordinary_heat, protected_status),
+        )
+    if context_layer == "goal" and fragment.goal_role != "attached_data":
+        protected_axes = _goal_scores(fragment)
+        protected_status = max(
+            1.0 - protected_axes["goal_integrity_score"],
+            protected_axes["goal_supersession_score"],
+            protected_axes["goal_conflict_score"],
+            protected_axes["goal_overhang_score"],
+            protected_axes["goal_cold_gap_score"],
+            protected_axes["attached_data_taint_score"],
+        )
+        protected_reasons = _protected_reasons(protected_axes)
+        heat = protected_status
+        excluded = protected_status < PROTECTED_RED_THRESHOLD
+        reasons = list(protected_reasons)
+        if not reasons and ordinary_heat >= 0.25:
+            reasons.append("protected_goal_anchor_cost")
+        axes.update(protected_axes)
+        return FragmentScore(
+            axes=axes,
+            heat=heat,
+            reasons=reasons,
+            confidence=confidence,
+            ordinary_cost=ordinary_heat,
+            protected_status=protected_status,
+            excluded_from_red_token_share=excluded,
+            protected_reasons=protected_reasons,
+            context_layer=context_layer,
+            authority_level=authority_level,
+            color=_protected_color(context_layer, ordinary_heat, protected_status),
+        )
+    if fragment.goal_role == "attached_data":
+        attached_taint = _metadata_score(fragment, "attached_data_taint_score")
+        axes["attached_data_taint_score"] = attached_taint
+        if attached_taint >= 0.50 and "attached_data_taint" not in ordinary_reasons:
+            ordinary_reasons.append("attached_data_taint")
+        ordinary_heat = clamp(max(ordinary_heat, attached_taint))
+    return FragmentScore(
+        axes=axes,
+        heat=ordinary_heat,
+        reasons=ordinary_reasons,
+        confidence=confidence,
+        ordinary_cost=ordinary_heat,
+        protected_status=0.0,
+        excluded_from_red_token_share=False,
+        protected_reasons=[],
+        context_layer=context_layer,
+        authority_level=authority_level,
+        color=_heat_color_name(ordinary_heat),
+    )
+
+
+def _ordinary_score_fragment(
+    fragment: ContextFragmentRecord,
+    packet: ContextPacketRecord,
+    active_hash_counts: Counter[str],
+    recent_counts: Counter[str],
+    growth_slope: float,
+) -> tuple[dict[str, float], float, list[str], float]:
+    """Сохраняем исходную формулу heat для рабочего контекста."""
 
     token_share = fragment.tokens / max(packet.input_tokens, 1)
     window_fill = (
@@ -68,6 +188,171 @@ def score_fragment(
     confidence = min(packet.reconstruction_confidence, _fragment_confidence(fragment))
     heat = clamp(pressure * (0.35 + 0.65 * risk) * impact * confidence)
     return axes, heat, _reasons(axes, fragment), confidence
+
+
+def _normative_scores(
+    fragment: ContextFragmentRecord,
+    active_hash_counts: Counter[str],
+) -> dict[str, float]:
+    """Считаем protected status для правил, а не цену их длины."""
+
+    conflict = max(
+        _metadata_score(fragment, "instruction_conflict_score"),
+        0.90 if fragment.applicability == "conflicting" else 0.0,
+    )
+    staleness = max(
+        _metadata_score(fragment, "instruction_staleness_score"),
+        0.85
+        if fragment.validity == "stale"
+        or fragment.stability == "superseded"
+        or fragment.applicability == "superseded"
+        else 0.0,
+    )
+    duplication = max(
+        _metadata_score(fragment, "instruction_duplication_score"),
+        0.85
+        if fragment.content_hash and active_hash_counts[fragment.content_hash] > 1
+        else 0.0,
+    )
+    scope = max(
+        _metadata_score(fragment, "instruction_scope_score"),
+        1.0 if fragment.applicability == "wrong_project" else 0.0,
+        0.65 if fragment.applicability == "inactive_role" else 0.0,
+    )
+    integrity = max(
+        _metadata_score(fragment, "instruction_integrity_score"),
+        1.0 if fragment.authority_level in {"external", "user", "assistant"} else 0.0,
+        0.30 if not fragment.content_hash else 0.0,
+    )
+    taint = max(
+        _metadata_score(fragment, "instruction_taint_score"),
+        _taint(fragment),
+        1.0 if fragment.authority_level == "external" else 0.0,
+    )
+    return {
+        "instruction_conflict_score": clamp(conflict),
+        "instruction_staleness_score": clamp(staleness),
+        "instruction_duplication_score": clamp(duplication),
+        "instruction_scope_score": clamp(scope),
+        "instruction_integrity_score": clamp(integrity),
+        "instruction_taint_score": clamp(taint),
+    }
+
+
+def _goal_scores(fragment: ContextFragmentRecord) -> dict[str, float]:
+    """Считаем protected status для активной цели пользователя."""
+
+    integrity = _metadata_score(fragment, "goal_integrity_score", default=1.0)
+    if fragment.metadata.get("lost_acceptance_criteria"):
+        integrity = min(integrity, 0.20)
+    supersession = max(
+        _metadata_score(fragment, "goal_supersession_score"),
+        0.90
+        if fragment.stability == "superseded"
+        or fragment.applicability == "superseded"
+        else 0.0,
+    )
+    conflict = max(
+        _metadata_score(fragment, "goal_conflict_score"),
+        0.85 if fragment.applicability == "conflicting" else 0.0,
+    )
+    overhang = max(
+        _metadata_score(fragment, "goal_overhang_score"),
+        0.75
+        if fragment.applicability in {"completed", "inactive_role", "superseded"}
+        else 0.0,
+    )
+    return {
+        "goal_integrity_score": clamp(integrity),
+        "goal_supersession_score": clamp(supersession),
+        "goal_conflict_score": clamp(conflict),
+        "goal_overhang_score": clamp(overhang),
+        "goal_cold_gap_score": _metadata_score(fragment, "goal_cold_gap_score"),
+        "attached_data_taint_score": _metadata_score(
+            fragment,
+            "attached_data_taint_score",
+        ),
+    }
+
+
+def _metadata_score(
+    fragment: ContextFragmentRecord,
+    key: str,
+    *,
+    default: float = 0.0,
+) -> float:
+    """Достаём числовой score из metadata без доверия внешнему типу."""
+
+    value = fragment.metadata.get(key)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int | float):
+        return clamp(float(value))
+    try:
+        return clamp(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _protected_reasons(scores: dict[str, float]) -> list[str]:
+    """Переводим protected metrics в стабильные причины отчета."""
+
+    reasons = []
+    reason_by_score = {
+        "instruction_conflict_score": "instruction_conflict",
+        "instruction_staleness_score": "instruction_stale_or_superseded",
+        "instruction_duplication_score": "instruction_duplicate",
+        "instruction_scope_score": "instruction_scope_mismatch",
+        "instruction_integrity_score": "instruction_integrity_problem",
+        "instruction_taint_score": "instruction_tainted_or_untrusted",
+        "goal_integrity_score": "goal_integrity_loss",
+        "goal_supersession_score": "goal_superseded",
+        "goal_conflict_score": "goal_conflict",
+        "goal_overhang_score": "goal_overhang",
+        "goal_cold_gap_score": "goal_cold_gap",
+        "attached_data_taint_score": "attached_data_taint",
+    }
+    for key, reason in reason_by_score.items():
+        value = scores.get(key)
+        if value is None:
+            continue
+        if key == "goal_integrity_score":
+            if 1.0 - value >= 0.50:
+                reasons.append(reason)
+            continue
+        if value >= 0.50:
+            reasons.append(reason)
+    return reasons
+
+
+def _protected_color(
+    context_layer: str,
+    ordinary_heat: float,
+    protected_status: float,
+) -> str:
+    """Цвет protected-фрагмента зависит от проблемы, а не только от цены."""
+
+    if protected_status >= 0.75:
+        return "red"
+    if protected_status >= 0.50:
+        return "orange"
+    if ordinary_heat >= 0.25:
+        return "yellow"
+    if context_layer == "goal":
+        return "green"
+    return "gray"
+
+
+def _heat_color_name(value: float) -> str:
+    """Называем старые пороги heat теми же цветами, что и HTML."""
+
+    if value < 0.25:
+        return "green"
+    if value < 0.50:
+        return "yellow"
+    if value < 0.75:
+        return "orange"
+    return "red"
 
 
 def detect_cold_gaps(events: list[SessionEvent]) -> list[Finding]:

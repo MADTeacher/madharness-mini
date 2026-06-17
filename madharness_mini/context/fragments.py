@@ -22,6 +22,13 @@ class ContextFragment:
     priority: int = 100
     placement: str = "system"
     transient: bool = False
+    authority_level: str = "unknown"
+    context_layer: str = "unknown"
+    evictability: str = "normal"
+    stability: str = "unknown"
+    applicability: str = "unknown"
+    normative_role: str = "none"
+    goal_role: str = "none"
 
 
 @dataclass(frozen=True)

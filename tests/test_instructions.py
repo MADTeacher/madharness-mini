@@ -42,6 +42,27 @@ class InstructionTests(HarnessTestCase):
         self.assertIn("# Project instructions", messages[0]["content"])
         self.assertIn("Use the project test command.", messages[0]["content"])
 
+    def test_base_context_reports_project_instructions_as_separate_unit(self):
+        cfg = self.make_cfg()
+        (cfg.root / "AGENTS.md").write_text(
+            "Use the project test command.\n", encoding="utf-8"
+        )
+        ctx = base_context(cfg, "Return a short greeting")
+
+        ctx.messages()
+        units = ctx.report()["context_packet"]["units"]
+        system = next(unit for unit in units if unit["source_ref"] == "system")
+        project = next(
+            unit for unit in units if unit["source_ref"] == "project-instructions"
+        )
+
+        self.assertEqual(system["authority_level"], "system")
+        self.assertEqual(system["context_layer"], "normative")
+        self.assertEqual(project["source_name"], "AGENTS.md")
+        self.assertEqual(project["authority_level"], "project")
+        self.assertEqual(project["context_layer"], "normative")
+        self.assertEqual(project["applicability"], "current_project")
+
     def test_empty_agents_md_is_ignored(self):
         cfg = self.make_cfg()
         (cfg.root / "AGENTS.md").write_text("  \n\n", encoding="utf-8")

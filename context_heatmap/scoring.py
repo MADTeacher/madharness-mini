@@ -45,7 +45,7 @@ def analyze_events(
             fragment = fragment_by_id.get(fragment_id)
             if not fragment:
                 continue
-            axes, heat, reasons, confidence = score_fragment(
+            score = score_fragment(
                 fragment,
                 packet,
                 active_hash_counts,
@@ -57,10 +57,17 @@ def analyze_events(
                     session_id=packet.session_id,
                     model_call_id=packet.model_call_id,
                     fragment_id=fragment.fragment_id,
-                    heat=round(heat, 4),
-                    confidence=round(confidence, 4),
-                    axes={key: round(value, 4) for key, value in axes.items()},
-                    reasons=reasons,
+                    heat=round(score.heat, 4),
+                    confidence=round(score.confidence, 4),
+                    axes={key: round(value, 4) for key, value in score.axes.items()},
+                    reasons=score.reasons,
+                    context_layer=score.context_layer,
+                    authority_level=score.authority_level,
+                    ordinary_cost=round(score.ordinary_cost, 4),
+                    protected_status=round(score.protected_status, 4),
+                    excluded_from_red_token_share=score.excluded_from_red_token_share,
+                    protected_reasons=score.protected_reasons,
+                    color=score.color,
                     evidence_event_ids=[fragment.created_by_event_id]
                     if fragment.created_by_event_id
                     else [],

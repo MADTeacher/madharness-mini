@@ -30,16 +30,17 @@ def aggregate_turns(
     for packet in packets:
         records = heat_by_call.get(packet.model_call_id, [])
         token_by_fragment = {item.fragment_id: item.tokens for item in packet.fragments}
-        total_tokens = max(sum(token_by_fragment.values()), 1)
+        total_tokens = max(packet.input_tokens, sum(token_by_fragment.values()), 1)
         red_tokens = sum(
             token_by_fragment.get(item.fragment_id, 0)
             for item in records
-            if item.heat >= 0.75
+            if item.heat >= 0.75 and not item.excluded_from_red_token_share
         )
         stale_tokens = sum(
             token_by_fragment.get(item.fragment_id, 0)
             for item in records
             if float(item.axes.get("staleness") or 0.0) >= 0.50
+            or float(item.axes.get("instruction_staleness_score") or 0.0) >= 0.50
         )
         raw_tool_tokens = sum(
             fragment.tokens
@@ -56,6 +57,46 @@ def aggregate_turns(
             token_by_fragment.get(item.fragment_id, 0)
             for item in records
             if float(item.axes.get("taint") or 0.0) >= 0.50
+            or float(item.axes.get("instruction_taint_score") or 0.0) >= 0.50
+            or float(item.axes.get("attached_data_taint_score") or 0.0) >= 0.50
+        )
+        fixed_instruction_tokens = sum(
+            token_by_fragment.get(item.fragment_id, 0)
+            for item in records
+            if item.context_layer == "normative"
+        )
+        goal_anchor_tokens = sum(
+            token_by_fragment.get(item.fragment_id, 0)
+            for item in records
+            if item.context_layer == "goal"
+        )
+        instruction_conflict_score = _max_axis(records, "instruction_conflict_score")
+        instruction_staleness_score = _max_axis(records, "instruction_staleness_score")
+        instruction_duplication_score = _max_axis(records, "instruction_duplication_score")
+        instruction_scope_score = _max_axis(records, "instruction_scope_score")
+        instruction_integrity_score = _max_axis(records, "instruction_integrity_score")
+        instruction_taint_score = _max_axis(records, "instruction_taint_score")
+        goal_integrity_score = _min_axis(records, "goal_integrity_score", default=1.0)
+        goal_supersession_score = _max_axis(records, "goal_supersession_score")
+        goal_conflict_score = _max_axis(records, "goal_conflict_score")
+        goal_overhang_score = _max_axis(records, "goal_overhang_score")
+        goal_cold_gap_score = _max_axis(records, "goal_cold_gap_score")
+        attached_data_taint_score = _max_axis(records, "attached_data_taint_score")
+        normative_status = max(
+            instruction_conflict_score,
+            instruction_staleness_score,
+            instruction_duplication_score,
+            instruction_scope_score,
+            instruction_integrity_score,
+            instruction_taint_score,
+        )
+        goal_status = max(
+            1.0 - goal_integrity_score,
+            goal_supersession_score,
+            goal_conflict_score,
+            goal_overhang_score,
+            goal_cold_gap_score,
+            attached_data_taint_score,
         )
         reason_counts = Counter(
             reason for item in records for reason in item.reasons
@@ -90,10 +131,47 @@ def aggregate_turns(
                 ),
                 growth_slope=round(growth_slope, 4),
                 taint_exposure=round(tainted_tokens / total_tokens, 4),
+                fixed_instruction_cost=round(
+                    fixed_instruction_tokens / total_tokens,
+                    4,
+                ),
+                goal_anchor_cost=round(goal_anchor_tokens / total_tokens, 4),
+                normative_status=round(normative_status, 4),
+                goal_status=round(goal_status, 4),
+                instruction_conflict_score=round(instruction_conflict_score, 4),
+                instruction_staleness_score=round(instruction_staleness_score, 4),
+                instruction_duplication_score=round(instruction_duplication_score, 4),
+                instruction_scope_score=round(instruction_scope_score, 4),
+                instruction_integrity_score=round(instruction_integrity_score, 4),
+                instruction_taint_score=round(instruction_taint_score, 4),
+                goal_integrity_score=round(goal_integrity_score, 4),
+                goal_supersession_score=round(goal_supersession_score, 4),
+                goal_conflict_score=round(goal_conflict_score, 4),
+                goal_overhang_score=round(goal_overhang_score, 4),
+                goal_cold_gap_score=round(goal_cold_gap_score, 4),
+                attached_data_taint_score=round(attached_data_taint_score, 4),
                 top_reasons=[reason for reason, _count in reason_counts.most_common(5)],
             )
         )
     return result
+
+
+def _max_axis(records: list[FragmentHeatRecord], axis: str) -> float:
+    """Берём худший score по обращению к модели."""
+
+    return max((float(item.axes.get(axis) or 0.0) for item in records), default=0.0)
+
+
+def _min_axis(
+    records: list[FragmentHeatRecord],
+    axis: str,
+    *,
+    default: float,
+) -> float:
+    """Для integrity важен минимальный сохранённый показатель."""
+
+    values = [float(item.axes.get(axis)) for item in records if axis in item.axes]
+    return min(values, default=default)
 
 
 def session_report(
@@ -122,6 +200,34 @@ def session_report(
             (item.cold_gap_score for item in turn_heat),
             default=0.0,
         ),
+        "max_fixed_instruction_cost": max(
+            (item.fixed_instruction_cost for item in turn_heat),
+            default=0.0,
+        ),
+        "max_goal_anchor_cost": max(
+            (item.goal_anchor_cost for item in turn_heat),
+            default=0.0,
+        ),
+        "max_normative_status": max(
+            (item.normative_status for item in turn_heat),
+            default=0.0,
+        ),
+        "max_goal_status": max(
+            (item.goal_status for item in turn_heat),
+            default=0.0,
+        ),
+        "max_instruction_scope_score": max(
+            (item.instruction_scope_score for item in turn_heat),
+            default=0.0,
+        ),
+        "max_goal_supersession_score": max(
+            (item.goal_supersession_score for item in turn_heat),
+            default=0.0,
+        ),
+        "max_attached_data_taint_score": max(
+            (item.attached_data_taint_score for item in turn_heat),
+            default=0.0,
+        ),
         "findings": len(findings),
         "warnings": len(warnings),
         "main_findings": [
@@ -148,5 +254,6 @@ def session_report(
             "session_report": "session_report.json",
             "report": "report.md",
             "heatmap": "heatmap.html",
+            "heatmap_png": "heatmap.png",
         },
     }

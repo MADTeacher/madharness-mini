@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .fragments import fragment_id_for_unit
+from .fragments import _classification_for_source_type, fragment_id_for_unit
 from .schema import ContextPacketRecord, PacketFragment, SessionEvent
 
 
@@ -60,13 +60,7 @@ def _packet_from_context_packet(
         if not isinstance(unit, dict):
             continue
         fragments.append(
-            PacketFragment(
-                fragment_id=fragment_id_for_unit(event.session_id, unit),
-                position_start=int(unit.get("position_start") or 0),
-                position_end=int(unit.get("position_end") or 0),
-                tokens=int(unit.get("tokens_estimate") or 0),
-                source_type=str(unit.get("source_type") or "unknown"),
-            )
+            _packet_fragment_from_unit(event, unit)
         )
     warnings = list(context_packet.get("warnings") or [])
     return (
@@ -85,6 +79,30 @@ def _packet_from_context_packet(
             warnings=[str(item) for item in warnings],
         ),
         [],
+    )
+
+
+def _packet_fragment_from_unit(
+    event: SessionEvent,
+    unit: dict[str, Any],
+) -> PacketFragment:
+    """Строим позицию prompt unit вместе с классификацией слоя."""
+
+    source_type = str(unit.get("source_type") or "unknown")
+    metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+    classification = _classification_for_source_type(source_type)
+    for key, fallback in list(classification.items()):
+        value = unit.get(key)
+        if value is None:
+            value = metadata.get(key)
+        classification[key] = str(value or fallback)
+    return PacketFragment(
+        fragment_id=fragment_id_for_unit(event.session_id, unit),
+        position_start=int(unit.get("position_start") or 0),
+        position_end=int(unit.get("position_end") or 0),
+        tokens=int(unit.get("tokens_estimate") or 0),
+        source_type=source_type,
+        **classification,
     )
 
 
@@ -107,6 +125,7 @@ def _legacy_packet(
                 position_end=cursor + tokens,
                 tokens=tokens,
                 source_type="context_fragment",
+                **_classification_for_source_type("context_fragment"),
             )
         )
         cursor += tokens
@@ -125,6 +144,7 @@ def _legacy_packet(
                     position_end=cursor + tokens,
                     tokens=tokens,
                     source_type=source_type,
+                    **_classification_for_source_type(source_type),
                 )
             )
             cursor += tokens

@@ -42,6 +42,13 @@ class ContextFragmentRecord:
     trust: str = "unknown"
     taint: str = "none"
     validity: str = "unknown"
+    authority_level: str = "unknown"
+    context_layer: str = "unknown"
+    evictability: str = "normal"
+    stability: str = "unknown"
+    applicability: str = "unknown"
+    normative_role: str = "none"
+    goal_role: str = "none"
     target_paths: list[str] = field(default_factory=list)
     created_by_event_id: str = ""
     content_hash: str = ""
@@ -63,6 +70,13 @@ class PacketFragment:
     position_end: int
     tokens: int
     source_type: str
+    authority_level: str = "unknown"
+    context_layer: str = "unknown"
+    evictability: str = "normal"
+    stability: str = "unknown"
+    applicability: str = "unknown"
+    normative_role: str = "none"
+    goal_role: str = "none"
 
     def to_dict(self) -> JsonDict:
         """Возвращаем форму для вложенного JSON."""
@@ -102,6 +116,13 @@ class FragmentHeatRecord:
     confidence: float
     axes: JsonDict
     reasons: list[str]
+    context_layer: str = "unknown"
+    authority_level: str = "unknown"
+    ordinary_cost: float = 0.0
+    protected_status: float = 0.0
+    excluded_from_red_token_share: bool = False
+    protected_reasons: list[str] = field(default_factory=list)
+    color: str = "green"
     evidence_event_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> JsonDict:
@@ -126,6 +147,22 @@ class TurnHeatRecord:
     positioned_evidence_score: float
     growth_slope: float
     taint_exposure: float
+    fixed_instruction_cost: float
+    goal_anchor_cost: float
+    normative_status: float
+    goal_status: float
+    instruction_conflict_score: float
+    instruction_staleness_score: float
+    instruction_duplication_score: float
+    instruction_scope_score: float
+    instruction_integrity_score: float
+    instruction_taint_score: float
+    goal_integrity_score: float
+    goal_supersession_score: float
+    goal_conflict_score: float
+    goal_overhang_score: float
+    goal_cold_gap_score: float
+    attached_data_taint_score: float
     top_reasons: list[str]
 
     def to_dict(self) -> JsonDict:

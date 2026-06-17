@@ -52,6 +52,7 @@ def _fragment_from_unit(
     source_type = str(unit.get("source_type") or "unknown")
     source_name = str(unit.get("source_name") or "")
     metadata = dict(unit.get("metadata") or {})
+    attached_taint = _attached_data_taint(metadata)
     return ContextFragmentRecord(
         fragment_id=fragment_id_for_unit(event.session_id, unit),
         session_id=event.session_id,
@@ -60,8 +61,16 @@ def _fragment_from_unit(
         tokens=int(unit.get("tokens_estimate") or 0),
         token_count_method="char_estimate",
         trust=_trust_for(source_type),
-        taint="unknown" if source_type in {"tool_output", "unknown"} else "none",
+        taint=str(unit.get("taint") or "")
+        or (
+            "possible_injection"
+            if attached_taint >= 0.50
+            else "unknown"
+            if source_type in {"tool_output", "unknown"}
+            else "none"
+        ),
         validity="unknown",
+        **_classification_from_unit(source_type, unit),
         target_paths=_target_paths_from_metadata(metadata),
         created_by_event_id=event.event_id,
         content_hash=str(unit.get("content_hash") or ""),
@@ -93,6 +102,7 @@ def _legacy_fragments(
                 tokens=max(int(item.get("chars") or 0) // 3, 1),
                 token_count_method="char_estimate",
                 trust="unknown",
+                **_classification_for_source_type("context_fragment"),
                 created_by_event_id=event.event_id,
                 content_hash=_hash_payload(item),
                 metadata={"legacy": True, "confidence": 0.55},
@@ -116,6 +126,11 @@ def _legacy_fragments(
                     token_count_method="char_estimate",
                     trust="unknown",
                     taint="unknown",
+                    **_classification_for_source_type(
+                        "assistant_message"
+                        if item.get("kind") == "assistant"
+                        else "tool_output"
+                    ),
                     created_by_event_id=event.event_id,
                     content_hash=_hash_payload(item),
                     metadata={"legacy": True, "confidence": 0.55},
@@ -141,6 +156,7 @@ def _fragment_from_tool_result(event: SessionEvent) -> ContextFragmentRecord | N
         trust="local_verified",
         taint="secret" if secret or contains_secret(text) else "none",
         validity="unknown",
+        **_classification_for_source_type(_tool_source_type(tool, observation)),
         target_paths=_target_paths_from_tool(event.payload),
         created_by_event_id=event.event_id,
         content_hash=_hash_payload(observation),
@@ -186,6 +202,18 @@ def _target_paths_from_tool(payload: dict[str, Any]) -> list[str]:
     return sorted(set(paths))
 
 
+def _attached_data_taint(metadata: dict[str, Any]) -> float:
+    """Читаем taint score вложенного пользовательского материала."""
+
+    value = metadata.get("attached_data_taint_score")
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _trust_for(source_type: str) -> str:
     if source_type in {"system_instruction", "developer_instruction", "user_message"}:
         return "trusted"
@@ -196,6 +224,107 @@ def _trust_for(source_type: str) -> str:
     if source_type == "assistant_message":
         return "generated"
     return "unknown"
+
+
+def _classification_from_unit(
+    source_type: str,
+    unit: dict[str, Any],
+) -> dict[str, str]:
+    """Читаем классификацию из новой telemetry или строим fallback."""
+
+    fallback = _classification_for_source_type(source_type)
+    metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+    result: dict[str, str] = {}
+    for key, fallback_value in fallback.items():
+        value = unit.get(key)
+        if value is None:
+            value = metadata.get(key)
+        result[key] = str(value or fallback_value)
+    return result
+
+
+def _classification_for_source_type(source_type: str) -> dict[str, str]:
+    """Назначаем слой для legacy trace без явной классификации."""
+
+    if source_type == "system_instruction":
+        return {
+            "authority_level": "system",
+            "context_layer": "normative",
+            "evictability": "never",
+            "stability": "stable",
+            "applicability": "active",
+            "normative_role": "safety",
+            "goal_role": "none",
+        }
+    if source_type == "developer_instruction":
+        return {
+            "authority_level": "developer",
+            "context_layer": "normative",
+            "evictability": "never",
+            "stability": "stable",
+            "applicability": "active",
+            "normative_role": "workflow",
+            "goal_role": "none",
+        }
+    if source_type == "user_message":
+        return {
+            "authority_level": "user",
+            "context_layer": "goal",
+            "evictability": "goal_update_only",
+            "stability": "task",
+            "applicability": "active",
+            "normative_role": "none",
+            "goal_role": "primary_goal",
+        }
+    if source_type in {"file_snippet", "test_result"}:
+        return {
+            "authority_level": "tool",
+            "context_layer": "evidence",
+            "evictability": "normal",
+            "stability": "turn",
+            "applicability": "current_task",
+            "normative_role": "none",
+            "goal_role": "none",
+        }
+    if source_type == "tool_schema":
+        return {
+            "authority_level": "tool",
+            "context_layer": "tooling",
+            "evictability": "normal",
+            "stability": "session",
+            "applicability": "active",
+            "normative_role": "none",
+            "goal_role": "none",
+        }
+    if source_type == "assistant_message":
+        return {
+            "authority_level": "assistant",
+            "context_layer": "working",
+            "evictability": "preferred",
+            "stability": "turn",
+            "applicability": "current_task",
+            "normative_role": "none",
+            "goal_role": "none",
+        }
+    if source_type == "tool_output":
+        return {
+            "authority_level": "tool",
+            "context_layer": "working",
+            "evictability": "preferred",
+            "stability": "turn",
+            "applicability": "current_task",
+            "normative_role": "none",
+            "goal_role": "none",
+        }
+    return {
+        "authority_level": "unknown",
+        "context_layer": "unknown",
+        "evictability": "normal",
+        "stability": "unknown",
+        "applicability": "unknown",
+        "normative_role": "none",
+        "goal_role": "none",
+    }
 
 
 def _hash_payload(payload: Any) -> str:

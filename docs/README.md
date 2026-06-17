@@ -7,7 +7,7 @@
 - [Возможности полной версии](capabilities.md)
 - [Структура кода](code-overview.md)
 - [Слой контекста](context-layer.md)
-- [Тепловая карта контекста](context-heatmap-roadmap.md)
+- [Как пользоваться context_heatmap](context-heatmap.md)
 - [Agent Skills](agent-skills.md)
 - [MCP](mcp.md)
 - [Субагенты](subagents.md)

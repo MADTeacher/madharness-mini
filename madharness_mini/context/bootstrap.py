@@ -34,17 +34,36 @@ def base_context(
         keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
         providers=providers,
     )
-    system = load_prompt("system")
-    project_instructions = load_project_instructions(cfg)
-    if project_instructions:
-        system = f"{system}\n\n# Project instructions\n\n{project_instructions}"
     context.add_fragment(
         ContextFragment(
             id="system",
             source="madharness_mini/prompts/system.md",
-            text=system,
+            text=load_prompt("system"),
             priority=0,
             placement="system",
+            authority_level="system",
+            context_layer="normative",
+            evictability="never",
+            stability="stable",
+            applicability="active",
+            normative_role="safety",
         )
     )
+    project_instructions = load_project_instructions(cfg)
+    if project_instructions:
+        context.add_fragment(
+            ContextFragment(
+                id="project-instructions",
+                source="AGENTS.md",
+                text=f"# Project instructions\n\n{project_instructions}",
+                priority=1,
+                placement="system",
+                authority_level="project",
+                context_layer="normative",
+                evictability="only_after_validation",
+                stability="stable",
+                applicability="current_project",
+                normative_role="workflow",
+            )
+        )
     return context
