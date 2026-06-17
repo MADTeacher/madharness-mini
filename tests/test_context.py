@@ -1,6 +1,6 @@
 import json
 
-from madharness_mini.context import ContextFragment, ContextManager
+from madharness_mini.context import ContextFragment, ContextManager, FileRef
 
 from tests.helpers import HarnessTestCase
 
@@ -325,3 +325,209 @@ class ContextManagerTests(HarnessTestCase):
         self.assertEqual(attached["context_layer"], "working")
         self.assertGreaterEqual(attached["metadata"]["attached_data_taint_score"], 0.8)
         self.assertNotIn("ignore previous instructions", rendered)
+
+    def _record_file_ref(self, ctx, call_id, ref):
+        """Удобная обёртка: один assistant tool_call + одна file_ref правка."""
+        call = {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "file_tool", "arguments": "{}"},
+        }
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {"ok": True, "tool": "file_tool", "summary": ref.path},
+            file_refs=[ref],
+        )
+
+    def test_file_state_tracks_read_and_write_and_marks_dirty(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "read"))
+        self._record_file_ref(ctx, "c2", FileRef("server.js", "write"))
+
+        dirty = ctx._dirty_files()
+
+        self.assertEqual([path for path, _turn in dirty], ["server.js"])
+
+    def test_file_state_clean_after_fresh_read(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "write"))
+        self._record_file_ref(ctx, "c2", FileRef("server.js", "read"))
+
+        self.assertEqual(ctx._dirty_files(), [])
+
+    def test_file_state_reminder_injected_for_dirty_file(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "write"))
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertIn("Напоминание о файловом состоянии", rendered)
+        self.assertIn("server.js", rendered)
+
+    def test_file_state_no_reminder_when_clean(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "read"))
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertNotIn("Напоминание о файловом состоянии", rendered)
+
+    def test_record_tool_result_without_file_refs_is_backward_compatible(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        call = tool_call("call_legacy", "demo")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(call, {"ok": True, "tool": "demo", "summary": "ok"})
+
+        self.assertEqual(ctx._file_state, {})
+        self.assertEqual(ctx._dirty_files(), [])
+
+    def test_history_entry_report_lists_file_refs_without_content_hash(self):
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(
+            ctx, "c1", FileRef("server.js", "write", content_hash="abc123")
+        )
+
+        ctx.messages()
+        entry_report = ctx.report()["history"]["included_entries"][0]
+
+        self.assertEqual(entry_report["file_refs"], [{"path": "server.js", "kind": "write"}])
+
+    def test_tool_output_dedup_collapses_read_of_constant_fragment(self):
+        """read_file AGENTS.md сворачивается в указатель, если тот же текст уже постоянный фрагмент."""
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.add_fragment(
+            ContextFragment(id="project", source="AGENTS.md", text="# Project rules")
+        )
+        call = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {"ok": True, "tool": "read_file", "summary": "read AGENTS.md", "content": "# Project rules full text"},
+            file_refs=[FileRef("AGENTS.md", "read")],
+        )
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        dedup_report = ctx.report()["history"]["deduped_tool_messages"]
+
+        # Прочитанный контент сворачивается в дайджест-указатель: путь остаётся,
+        # полный текст исчезает, note подсказывает перечитать свежее состояние.
+        self.assertIn("_context_digested", rendered)
+        self.assertIn("AGENTS.md", rendered)
+        self.assertNotIn("# Project rules full text", rendered)
+        self.assertEqual(len(dedup_report), 1)
+        self.assertEqual(dedup_report[0]["rule"], "path_match")
+
+    def test_tool_output_dedup_collapses_intra_history_duplicates(self):
+        """Повторяющиеся идентичные observation сворачиваются, свежее остаётся."""
+        ctx = ContextManager("task", max_tokens=20000)
+        identical_obs = {"ok": True, "tool": "run_shell", "summary": "exit code 0", "stdout": "ok"}
+        for call_id in ("c1", "c2", "c3"):
+            call = tool_call(call_id, "run_shell")
+            ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+            ctx.record_tool_result(call, dict(identical_obs))
+
+        dedup_report = ctx.report()["history"]["deduped_tool_messages"]
+
+        # Свернулись два более старых вхождения, самое свежее осталось целым.
+        self.assertEqual(len(dedup_report), 2)
+        self.assertEqual({item["rule"] for item in dedup_report}, {"intra_history"})
+        self.assertEqual({item["turn"] for item in dedup_report}, {0, 1})
+
+    def test_tool_output_dedup_preserves_distinct_observations(self):
+        """Разные observation не трогаются."""
+        ctx = ContextManager("task", max_tokens=20000)
+        for call_id, summary in (("c1", "first"), ("c2", "second")):
+            call = tool_call(call_id, "run_shell")
+            ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+            ctx.record_tool_result(
+                call, {"ok": True, "tool": "run_shell", "summary": summary, "stdout": summary}
+            )
+
+        dedup_report = ctx.report()["history"]["deduped_tool_messages"]
+
+        self.assertEqual(dedup_report, [])
+
+    def test_summarize_after_turns_off_by_default(self):
+        """Без параметра старые entries остаются нетронутыми."""
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant({"role": "assistant", "content": "x" * 2000})
+        ctx.record_assistant({"role": "assistant", "content": "y" * 2000})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertNotIn("context clipped", rendered)
+        self.assertEqual(ctx.report()["history"]["summarized_old_entries"], [])
+
+    def test_summarize_after_turns_clips_old_assistant(self):
+        """Старый assistant-текст усекается, свежий остаётся целым."""
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        # Пять ходов: защитное окно = keep_recent(3) + summarize(1) = 4,
+        # значит entry 0 (старое длинное рассуждение) попадает под усечение.
+        ctx.record_assistant({"role": "assistant", "content": "x" * 2000})
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        self.assertIn("context clipped", rendered)
+        self.assertEqual(len(summarized), 1)
+
+    def test_summarize_after_turns_clips_old_tool_output(self):
+        """Старые tool-наблюдения сворачиваются через clip_tool_content."""
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_call = tool_call("c_old", "run_shell")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_call]})
+        ctx.record_tool_result(
+            old_call,
+            {"ok": True, "tool": "run_shell", "summary": "old", "stdout": "z" * 2000},
+        )
+        # Четыре свежих хода выталкивают старый tool turn за защитное окно.
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # clip_tool_content усекает длинный вывод; точный формат зависит от того,
+        # уложилась ли компактная сводка в лимит, поэтому проверяем сам факт обрезки.
+        self.assertIn("context clipped", rendered)
+        self.assertEqual(len(summarized), 1)
+
+    def test_summarize_after_turns_digests_old_read_file(self):
+        """Старый read_file сворачивается в указатель, а не в обрезок середины текста.
+
+        Это критично: модель должна сохранить знание, что и где читала (путь +
+        диапазон строк), иначе теряется связность доказательств. Полный текст
+        роняется, note подсказывает перечитать свежее состояние.
+        """
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_call = tool_call("c_old", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_call]})
+        ctx.record_tool_result(
+            old_call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read server.js:1-160",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 160,
+            },
+            file_refs=[FileRef("server.js", "read")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # read_file свернулся в дайджест: путь и note на месте, полного текста нет.
+        self.assertIn("_context_digested", rendered)
+        self.assertIn("server.js", rendered)
+        self.assertIn("read_file", rendered)
+        self.assertNotIn("code line", rendered)
+        # В отличие от run_shell, read_file не должен давать слепой "context clipped".
+        self.assertEqual(rendered.count("context clipped"), 0)
+        self.assertEqual(len(summarized), 1)

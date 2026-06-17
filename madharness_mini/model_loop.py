@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any
 
-from .context import ContextManager
+from .context import ContextManager, FileRef
 from .hooks import HookDecision, HookManager
 from .model import ModelClient, ModelRateLimitError, ModelTransientError
 from .tools import ToolRegistry
 from .trace import Trace
-from .utils import fail, parse_tool_args
+from .utils import fail, parse_tool_args, paths_from_patch
 
 # При 429 ждём Retry-After, но не дольше этой границы (секунды).
 RATE_LIMIT_RETRY_MAX_SECONDS = 60
@@ -233,7 +234,12 @@ def run_model_loop(
                     "observation": obs,
                     "turns": turn + 1,
                 }
-            context.record_tool_result(call, obs, followup_messages)
+            context.record_tool_result(
+                call,
+                obs,
+                followup_messages,
+                file_refs=_file_refs_from_call(name, args, obs),
+            )
             if is_parent_user_input_request(obs):
                 result = render_user_input_request(obs)
                 trace.write(
@@ -411,3 +417,49 @@ def safe_context_report(context: ContextManager) -> dict[str, Any]:
         return context.report()
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def _content_hash(text: str | None) -> str | None:
+    """Короткий хэш содержимого для файлового реестра; None для пустого ввода."""
+
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _file_refs_from_call(
+    name: str,
+    args: dict[str, Any],
+    observation: dict[str, Any],
+) -> list[FileRef]:
+    """Собираем файловые эффекты tool call для контекстного слоя.
+
+    Рассматриваем только успешные read/write/patch: неудачные вызовы не меняют
+    состояние файлов и не должны попадать в реестр. Для read берём хэш из того,
+    что увидела модель в observation (clipped excerpt); для write — из args,
+    где лежит полный записанный текст. apply_patch мультифайловый: пути достаём
+    общим парсером patch-формата.
+    """
+
+    if not observation.get("ok"):
+        return []
+    if name == "read_file":
+        path = args.get("path")
+        if not isinstance(path, str):
+            return []
+        content = observation.get("content")
+        return [FileRef(path=path, kind="read", content_hash=_content_hash(content))]
+    if name == "write_file":
+        path = args.get("path")
+        if not isinstance(path, str):
+            return []
+        content = args.get("content")
+        return [FileRef(path=path, kind="write", content_hash=_content_hash(content))]
+    if name == "apply_patch":
+        patch = args.get("patch")
+        if not isinstance(patch, str):
+            return []
+        # У apply_patch нет финального содержимого в observation, поэтому хэш
+        # неизвестен: для реестра важен сам факт правки пути.
+        return [FileRef(path=p, kind="patch") for p in paths_from_patch(patch)]
+    return []

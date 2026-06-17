@@ -6,6 +6,21 @@ from typing import Any
 
 
 @dataclass
+class FileRef:
+    """Описание файлового эффекта одного вызова инструмента.
+
+    Слой контекста получает от model_loop для read_file/write_file/apply_patch
+    ссылки на затронутые файлы: путь, тип воздействия и при возможности хэш
+    содержимого. По ним строится файловый реестр, который кормит напоминание о
+    «грязных» файлах (гипотеза C) и дедуп tool_output (гипотеза D).
+    """
+
+    path: str
+    kind: str  # "read" | "write" | "patch"
+    content_hash: str | None = None
+
+
+@dataclass
 class HistoryEntry:
     """Один элемент истории: обычный ответ или assistant+tool results."""
 
@@ -14,6 +29,8 @@ class HistoryEntry:
     expected_tool_call_ids: set[str] = field(default_factory=set)
     seen_tool_call_ids: set[str] = field(default_factory=set)
     pending_followups: list[dict[str, Any]] = field(default_factory=list)
+    # Файловые эффекты этого хода: нужны для дедупа и напоминания о состоянии.
+    file_refs: list[FileRef] = field(default_factory=list)
 
     def rendered_messages(self) -> list[dict[str, Any]]:
         """Отдаём tool follow-ups только после закрытия всех tool_calls."""

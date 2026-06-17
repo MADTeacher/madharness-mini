@@ -1,6 +1,7 @@
 """Слой контекста: фрагменты, история и сообщения для модели."""
 
 from .fragments import ContextFragment, ContextProvider, ContextState
+from .history import FileRef, HistoryEntry
 from .manager import ContextManager
 
 __all__ = [
@@ -8,4 +9,6 @@ __all__ = [
     "ContextManager",
     "ContextProvider",
     "ContextState",
+    "FileRef",
+    "HistoryEntry",
 ]

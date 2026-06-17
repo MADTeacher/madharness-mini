@@ -7,17 +7,21 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from .budget import (
     TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+    clip_tool_content,
     clip_tool_messages,
     clip_text,
+    dedup_tool_messages,
+    digest_read_file,
     estimate_request_tokens,
     estimate_tokens,
 )
 from .fragments import ContextFragment, ContextProvider, ContextState
-from .history import HistoryEntry
+from .history import FileRef, HistoryEntry
 from .render import render_messages
 
 # Полный assistant-текст полезен только до разумного предела: модель уже
@@ -26,6 +30,11 @@ ASSISTANT_CONTENT_LIMIT = 8000
 
 # Если assistant сразу вызывает tool, его текст обычно служебный; сохраняем кратко.
 ASSISTANT_TOOL_CONTENT_LIMIT = 2000
+
+# Пределы возрастной эвикции (гипотеза B): старые assistant-рассуждения и
+# tool-наблюдения усекаем до этих значений, оставляя «скелет» хода для модели.
+SUMMARY_ASSISTANT_LIMIT = 500
+SUMMARY_TOOL_LIMIT = 200
 
 # Маркер заменяет вложенный блок только в диагностическом goal-anchor hash.
 ATTACHED_DATA_MARKER = "[attached data tracked as a separate context unit]"
@@ -38,6 +47,22 @@ ATTACHED_HEADING_RE = re.compile(
     r"tool output|trace|web text|pasted text|вложенные данные|внешний документ|"
     r"документ|лог|вывод)\s*:?\s*$"
 )
+
+# Идентификатор transient-фрагмента с напоминанием о «грязных» файлах.
+FILE_STATE_REMINDER_ID = "file-state:reminder"
+
+
+@dataclass
+class _FileState:
+    """Запись о последнем чтении и правке одного пути.
+
+    Хранит номера ходов последнего read и write/patch. Файл считается «грязным»,
+    если правка случилась позже чтения (или файл не перечитывали вовсе). turn —
+    это индекс элемента истории, который оставил событие.
+    """
+
+    last_read_turn: int | None = None
+    last_write_turn: int | None = None
 
 
 class ContextManager:
@@ -54,14 +79,22 @@ class ContextManager:
         *,
         max_tokens: int = 60000,
         keep_recent_turns: int = 3,
+        summarize_after_turns: int = 0,
         providers: Iterable[ContextProvider] | None = None,
     ):
         self.user_task = user_task
         self.max_tokens = max(int(max_tokens), 0)
         self.keep_recent_turns = max(int(keep_recent_turns), 0)
+        # Граница возрастной эвикции: assistant-текст старше этого числа ходов
+        # усекается, а его tool-наблюдения сворачиваются. 0 — выкл (поведение по
+        # умолчанию), чтобы не менять существующие прогоны учебного харнесса.
+        self.summarize_after_turns = max(int(summarize_after_turns), 0)
         self.providers = list(providers or [])
         self._fragments: list[ContextFragment] = []
         self._history: list[HistoryEntry] = []
+        # Реестр файлового состояния: путь -> последняя read/write правка.
+        # Кормит напоминание о «грязных» файлах (гипотеза C) и не пишется в trace.
+        self._file_state: dict[str, _FileState] = {}
         self._last_stats: dict[str, int | bool] | None = None
         self._last_report: dict[str, Any] | None = None
 
@@ -98,8 +131,16 @@ class ContextManager:
         call: dict[str, Any],
         observation: dict[str, Any],
         followup_messages: Iterable[dict[str, Any]] = (),
+        *,
+        file_refs: Iterable[FileRef] = (),
     ) -> None:
-        """Добавляем role=tool и отложенные follow-up сообщения."""
+        """Добавляем role=tool и отложенные follow-up сообщения.
+
+        file_refs — опциональные файловые эффекты этого tool call (путь, тип,
+        хэш). Loop передаёт их для read_file/write_file/apply_patch, чтобы слой
+        контекста мог предупреждать о правках без свежего чтения. Старый вызов
+        без file_refs остаётся полностью совместимым: реестр просто не растёт.
+        """
 
         entry = self._last_tool_entry()
         call_id = str(call.get("id") or _tool_name(call, observation))
@@ -112,6 +153,13 @@ class ContextManager:
         )
         entry.seen_tool_call_ids.add(call_id)
         entry.pending_followups.extend(copy.deepcopy(list(followup_messages)))
+        refs = list(file_refs)
+        if refs:
+            # Индекс хода — позиция записи в истории до её возможного роста.
+            turn = len(self._history) - 1
+            for ref in refs:
+                self._update_file_state(ref, turn)
+            entry.file_refs = refs
         self._last_stats = None
         self._last_report = None
 
@@ -121,6 +169,10 @@ class ContextManager:
         fragments = self._collect_fragments()
         entries = copy.deepcopy(self._history)
         entry_indexes = list(range(len(entries)))
+        # Дедуп сворачивает избыточные tool-наблюдения (read_file, дублирующий
+        # постоянный фрагмент; повторы внутри истории) до оценки бюджета.
+        deduped_tool_messages = dedup_tool_messages(entries, fragments)
+        summarized_old_entries = self._summarize_old_entries(entries, entry_indexes)
         messages = render_messages(self.user_task, fragments, entries)
         initial_estimate = estimate_request_tokens(messages, tools)
         initial_tokens = initial_estimate["request_tokens_estimate"]
@@ -206,8 +258,11 @@ class ContextManager:
                 "total_entries": len(self._history),
                 "rendered_entries": len(entries),
                 "keep_recent_turns": self.keep_recent_turns,
+                "summarize_after_turns": self.summarize_after_turns,
                 "clip_limit_chars": clip_limit_chars,
                 "clipped_tool_messages": clipped_tool_messages,
+                "deduped_tool_messages": deduped_tool_messages,
+                "summarized_old_entries": summarized_old_entries,
                 "dropped_entries": dropped_entries,
                 "included_entries": [
                     _history_entry_report(entry, index)
@@ -251,6 +306,69 @@ class ContextManager:
         self._history.append(entry)
         return entry
 
+    def _update_file_state(self, ref: FileRef, turn: int) -> None:
+        """Обновляем реестр файлового состояния по одной ссылке от tool call.
+
+        read обновляет last_read_turn, write/patch — last_write_turn. Берём
+        максимум по turn, чтобы несколько событий по одному файлу в одном ходе
+        не затирали друг друга и сохраняли самую свежую правку.
+        """
+
+        state = self._file_state.setdefault(ref.path, _FileState())
+        if ref.kind == "read":
+            state.last_read_turn = (
+                turn if state.last_read_turn is None else max(state.last_read_turn, turn)
+            )
+        else:  # write или patch
+            state.last_write_turn = (
+                turn
+                if state.last_write_turn is None
+                else max(state.last_write_turn, turn)
+            )
+
+    def _dirty_files(self) -> list[tuple[str, int]]:
+        """Пути, изменённые после последнего чтения (или не прочитанные вовсе).
+
+        Возвращаем пары (путь, turn последней правки), отсортированные по убыванию
+        turn: самые свежие «грязные» файлы оказываются первыми в напоминании.
+        """
+
+        dirty: list[tuple[str, int]] = []
+        for path, state in self._file_state.items():
+            if state.last_write_turn is None:
+                continue
+            if state.last_read_turn is None or state.last_read_turn < state.last_write_turn:
+                dirty.append((path, state.last_write_turn))
+        dirty.sort(key=lambda item: item[1], reverse=True)
+        return dirty
+
+    def _file_state_reminder(self) -> ContextFragment | None:
+        """Собираем transient-напоминание о файлах, которые правились без read."""
+
+        dirty = self._dirty_files()
+        if not dirty:
+            return None
+        lines = ["# Напоминание о файловом состоянии"]
+        lines.append(
+            "Эти файлы изменены после последнего чтения. Перед правкой убедитесь, "
+            "что текущее содержимое известно, иначе вызовите read_file:"
+        )
+        for path, turn in dirty:
+            lines.append(f"- {path} (изменён на ходу {turn}, не перечитывался)")
+        return ContextFragment(
+            id=FILE_STATE_REMINDER_ID,
+            source="madharness-mini file-state reminder",
+            text="\n".join(lines),
+            priority=20,
+            placement="system",
+            transient=True,
+            authority_level="harness",
+            context_layer="evidence",
+            evictability="normal",
+            stability="turn",
+            applicability="current_task",
+        )
+
     def _collect_fragments(self) -> list[ContextFragment]:
         """Собираем закреплённые и provider-фрагменты в стабильном порядке."""
 
@@ -264,10 +382,66 @@ class ContextManager:
         fragments = list(self._fragments)
         for provider in self.providers:
             fragments.extend(provider.collect(state))
+        reminder = self._file_state_reminder()
+        if reminder is not None:
+            fragments.append(reminder)
         return sorted(
             fragments,
             key=lambda item: (item.placement, item.priority, item.id),
         )
+
+    def _summarize_old_entries(
+        self,
+        entries: list[HistoryEntry],
+        entry_indexes: list[int],
+    ) -> list[dict[str, Any]]:
+        """Сворачиваем старые entries по возрасту, не трогая свежие.
+
+        Работает только когда задан summarize_after_turns > 0. Защищаем окно из
+        keep_recent_turns и summarize_after_turns записей, а всё, что старше,
+        усекаем: assistant-текст — до SUMMARY_ASSISTANT_LIMIT, role=tool — через
+        digest_read_file для чтений файлов (указатель вместо обрезка) и
+        clip_tool_content для прочего вывода. Возвращает описания свёрнутых
+        записей для отчёта.
+        """
+
+        if self.summarize_after_turns <= 0:
+            return []
+        protected_count = self.keep_recent_turns + self.summarize_after_turns
+        protected_start = max(len(entries) - protected_count, 0)
+        summarized: list[dict[str, Any]] = []
+        for position in range(protected_start):
+            entry = entries[position]
+            original_index = entry_indexes[position]
+            read_paths = {
+                ref.path for ref in entry.file_refs if ref.kind == "read"
+            }
+            changed = False
+            for message in entry.messages:
+                role = message.get("role")
+                content = message.get("content")
+                if role == "assistant" and isinstance(content, str):
+                    if len(content) > SUMMARY_ASSISTANT_LIMIT:
+                        message["content"] = clip_text(content, SUMMARY_ASSISTANT_LIMIT)
+                        changed = True
+                elif role == "tool" and isinstance(content, str):
+                    if len(content) <= SUMMARY_TOOL_LIMIT:
+                        continue
+                    # read_file сворачиваем в указатель: модель сохраняет знание
+                    # о прочитанном, а не теряет его в обрезке середины текста.
+                    tool_name, payload_path = _tool_kind_and_path(content)
+                    path = payload_path or (
+                        next(iter(read_paths), None) if tool_name == "read_file" else None
+                    )
+                    if tool_name == "read_file":
+                        message["content"] = digest_read_file(content, path)
+                        changed = True
+                    else:
+                        message["content"] = clip_tool_content(content, SUMMARY_TOOL_LIMIT)
+                        changed = True
+            if changed:
+                summarized.append({"index": original_index, "kind": entry.kind})
+        return summarized
 
     def _drop_old_entries_until_budget(
         self,
@@ -389,7 +563,29 @@ def _history_entry_report(entry: HistoryEntry, index: int) -> dict[str, Any]:
         "roles": [str(message.get("role") or "") for message in rendered],
         "tool_call_ids": sorted(entry.expected_tool_call_ids | entry.seen_tool_call_ids),
         "pending_followups": len(entry.pending_followups),
+        # Файловые эффекты без хэшей содержимого: для диагностики дедупа и
+        # напоминания о состоянии достаточно путей и типов воздействия.
+        "file_refs": [{"path": ref.path, "kind": ref.kind} for ref in entry.file_refs],
     }
+
+
+def _tool_kind_and_path(content: str) -> tuple[str, str | None]:
+    """Достаём имя инструмента и путь из JSON-сериализованного tool-наблюдения.
+
+    Нужно, чтобы возрастная эвикция различала read_file (сворачиваем в указатель)
+    и прочие tool outputs (обрезаем). Путь может отсутствовать в observation —
+    тогда вызывающая сторона подставит его из file_refs.
+    """
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return "", None
+    if not isinstance(payload, dict):
+        return "", None
+    tool_name = str(payload.get("tool") or "")
+    path_value = str(payload.get("path") or "") or None
+    return tool_name, path_value
 
 
 def _context_packet_report(

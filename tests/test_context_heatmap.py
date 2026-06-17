@@ -333,6 +333,91 @@ class ContextHeatmapTests(HarnessTestCase):
         self.assertEqual(secret_axes["taint"], 1.0)
         self.assertIn("tainted_or_untrusted", secret_reasons)
 
+    def test_tool_schema_inter_turn_repeat_is_not_duplication(self):
+        """Схемы инструментов статичны и подаются каждый ход — inter-turn повтор
+        не должен считаться duplicate_context, иначе heatmap шумит на каждой
+        сессии со стабильным набором инструментов."""
+        packet = ContextPacketRecord(
+            model_call_id="s1:0",
+            session_id="s1",
+            turn_id=0,
+            input_tokens=1000,
+            context_window_tokens=1000,
+            fragments=[
+                PacketFragment(
+                    fragment_id="frag-tool_schema-tools-4--abc",
+                    position_start=0,
+                    position_end=499,
+                    tokens=499,
+                    source_type="tool_schema",
+                )
+            ],
+            reconstruction_confidence=0.9,
+        )
+        fragment = ContextFragmentRecord(
+            fragment_id="frag-tool_schema-tools-4--abc",
+            session_id="s1",
+            source_type="tool_schema",
+            source_name="apply_patch",
+            tokens=499,
+            token_count_method="char_estimate",
+            content_hash="schema-hash-apply-patch",
+            metadata={"confidence": 0.85},
+        )
+        # Тот же fragment_id встречался в последних 5 пакетах 3 раза —
+        # нормальная ситуация для статичных схем.
+        recent_counts = Counter({"frag-tool_schema-tools-4--abc": 3})
+        axes, _heat, reasons, _confidence = score_fragment(
+            fragment,
+            packet,
+            Counter(),  # intra-paket hash не повторяется
+            recent_counts,
+            0.0,
+        )
+        self.assertLess(axes["duplication"], 0.50)
+        self.assertNotIn("duplicate_context", reasons)
+
+    def test_tool_schema_intra_packet_duplication_is_kept(self):
+        """Если одна и та же схема дважды в одном пакете — это аномалия
+        конфигурации инструментов, её оставляем как duplicate_context."""
+        packet = ContextPacketRecord(
+            model_call_id="s1:0",
+            session_id="s1",
+            turn_id=0,
+            input_tokens=1000,
+            context_window_tokens=1000,
+            fragments=[
+                PacketFragment(
+                    fragment_id="frag-tool_schema-tools-4--abc",
+                    position_start=0,
+                    position_end=499,
+                    tokens=499,
+                    source_type="tool_schema",
+                )
+            ],
+            reconstruction_confidence=0.9,
+        )
+        fragment = ContextFragmentRecord(
+            fragment_id="frag-tool_schema-tools-4--abc",
+            session_id="s1",
+            source_type="tool_schema",
+            source_name="apply_patch",
+            tokens=499,
+            token_count_method="char_estimate",
+            content_hash="same-schema-hash",
+            metadata={"confidence": 0.85},
+        )
+        # Один и тот же hash встречается 2 раза в текущем пакете.
+        axes, _heat, reasons, _confidence = score_fragment(
+            fragment,
+            packet,
+            Counter({"same-schema-hash": 2}),
+            Counter(),
+            0.0,
+        )
+        self.assertGreaterEqual(axes["duplication"], 0.85)
+        self.assertIn("duplicate_context", reasons)
+
     def test_protected_system_prompt_does_not_increase_red_share_by_size(self):
         events = [
             _model_call_event(

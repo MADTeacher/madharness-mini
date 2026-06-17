@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ DEFAULT_CONFIG = {
     "max_turns": 50,
     "context_max_tokens": 60000,
     "context_keep_recent_turns": 3,
+    "context_summarize_after_turns": 0,
     "orchestration_enabled": True,
     "orchestration_mode": "auto",
     "subagent_max_turns": 10,
@@ -103,6 +105,34 @@ def parse_tool_args(
     raw = fn.get("arguments") or "{}"
     args = raw if isinstance(raw, dict) else json.loads(raw)
     return fn.get("name", ""), args
+
+
+# Шаблоны apply_patch-формата: каждый блок начинается с *** Add/Update/Delete File.
+_PATCH_FILE_PATTERN = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$")
+_PATCH_MOVE_PATTERN = re.compile(r"^\*\*\* Move to: (.+)$")
+
+
+def paths_from_patch(patch: str) -> list[str]:
+    """Извлекаем имена файлов из простого apply_patch-текста.
+
+    Возвращает уникальные пути в порядке первого упоминания. Используется и в
+    субагентах (сводка изменённых файлов), и в контекстном слое (учёт файлового
+    состояния), поэтому живёт здесь, чтобы не плодить копии и циклы импортов.
+    """
+
+    paths: list[str] = []
+    for line in patch.splitlines():
+        match = _PATCH_FILE_PATTERN.match(line) or _PATCH_MOVE_PATTERN.match(line)
+        if match:
+            paths.append(match.group(1).strip())
+    # Сохраняем порядок первого упоминания, убирая дубликаты.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path_name in paths:
+        if path_name not in seen:
+            seen.add(path_name)
+            unique.append(path_name)
+    return unique
 
 
 def obj(

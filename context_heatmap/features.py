@@ -477,9 +477,14 @@ def _duplication(
     recent_counts: Counter[str],
 ) -> float:
     score = 0.0
+    # Intra-packet дубликат (один hash встречается >1 раза в одном окне) —
+    # значимый сигнал для всех типов фрагментов.
     if fragment.content_hash and active_hash_counts[fragment.content_hash] > 1:
         score = max(score, 0.85)
-    if recent_counts[fragment.fragment_id] > 1:
+    # Inter-turn повтор того же fragment_id — для tool_schema это ожидаемо:
+    # схемы инструментов статичны и подаются каждый ход. Считаем их дубликатом
+    # только когда одинаковая схема встретилась дважды внутри одного пакета.
+    if fragment.source_type != "tool_schema" and recent_counts[fragment.fragment_id] > 1:
         score = max(score, min(recent_counts[fragment.fragment_id] / 5, 1.0) * 0.65)
     return score
 

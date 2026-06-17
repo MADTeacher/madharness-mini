@@ -32,6 +32,7 @@ def base_context(
             else int(cfg.data.get("context_max_tokens", 60000))
         ),
         keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
+        summarize_after_turns=int(cfg.data.get("context_summarize_after_turns", 0)),
         providers=providers,
     )
     context.add_fragment(

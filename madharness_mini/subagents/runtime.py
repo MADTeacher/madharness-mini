@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
+
+from ..utils import paths_from_patch
 
 
 def trace_path_for_observation(path: Path, root: Path) -> str:
@@ -52,7 +53,7 @@ def changed_files_from_events(events: list[dict[str, Any]]) -> list[str]:
         if tool == "write_file" and isinstance(args.get("path"), str):
             changed.append(args["path"])
         if tool == "apply_patch" and isinstance(args.get("patch"), str):
-            changed.extend(_paths_from_patch(args["patch"]))
+            changed.extend(paths_from_patch(args["patch"]))
     return sorted(set(changed))
 
 
@@ -72,16 +73,3 @@ def _read_trace_events(path: Path) -> list[dict[str, Any]]:
         if isinstance(event, dict):
             events.append(event)
     return events
-
-
-def _paths_from_patch(patch: str) -> list[str]:
-    """Извлекаем имена файлов из простого apply_patch-текста."""
-
-    paths: list[str] = []
-    pattern = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$")
-    move_pattern = re.compile(r"^\*\*\* Move to: (.+)$")
-    for line in patch.splitlines():
-        match = pattern.match(line) or move_pattern.match(line)
-        if match:
-            paths.append(match.group(1).strip())
-    return paths
