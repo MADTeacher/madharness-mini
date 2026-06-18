@@ -56,6 +56,8 @@ workspace-relative cwd such as a skill root when cwd is provided, and times out
 after 60 seconds. It must be a single command: shell control operators such as
 |, >, <, &&, ||, and ; are denied, and risky commands such as sudo, curl, wget,
 ssh, scp, chmod 777, mkfs, dd, and rm -rf are blocked by policy.
+run_shell is one-shot only: it blocks until the command exits, so don't use it
+for background, long-running, or parallel processes.
 Do not use run_shell to edit files; use apply_patch for precise edits and write_file
 only for deliberate full rewrites.
 """
