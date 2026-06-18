@@ -57,7 +57,9 @@ class ConfigCliTests(HarnessTestCase):
             "MADHARNESS_MINI_BASE_URL=https://new.example/v1\nMADHARNESS_MINI_MODEL=deepseek/deepseek-v4-flash\nMADHARNESS_MINI_API_KEY=secret\n",
             encoding="utf-8",
         )
-        cfg = Config(root)
+        # Чистим окружение процесса, чтобы тест проверял только файл `.env`.
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(root)
         self.addCleanup(tmp.cleanup)
         self.assertEqual(cfg.data["base_url"], "https://new.example/v1")
         self.assertEqual(cfg.data["model"], "deepseek/deepseek-v4-flash")
@@ -89,7 +91,6 @@ class ConfigCliTests(HarnessTestCase):
         (root / ".madharness-mini").mkdir()
         (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
         (root / ".env").write_text(
-            "MADHARNESS_MINI_ORCHESTRATION_ENABLED=false\n"
             "MADHARNESS_MINI_ORCHESTRATION_MODE=requested\n",
             encoding="utf-8",
         )
@@ -98,8 +99,26 @@ class ConfigCliTests(HarnessTestCase):
             cfg = Config(root)
 
         self.addCleanup(tmp.cleanup)
-        self.assertIs(cfg.data["orchestration_enabled"], False)
+        self.assertNotIn("orchestration_enabled", cfg.data)
         self.assertEqual(cfg.data["orchestration_mode"], "requested")
+
+    def test_env_file_disables_orchestration_via_mode(self):
+        # Полностью выключить делегирование теперь можно только через mode=off,
+        # без отдельного булева выключателя.
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
+        (root / ".env").write_text(
+            "MADHARNESS_MINI_ORCHESTRATION_MODE=off\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(root)
+
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(cfg.data["orchestration_mode"], "off")
 
     def test_env_file_rejects_unknown_orchestration_mode(self):
         tmp = tempfile.TemporaryDirectory()

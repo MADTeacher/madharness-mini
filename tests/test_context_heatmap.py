@@ -1668,12 +1668,12 @@ class ContextHeatmapTests(HarnessTestCase):
             with redirect_stdout(StringIO()):
                 heatmap_main(["validate", "--input", str(broken_path)])
 
-    def test_docs_link_context_heatmap_roadmap(self):
+    def test_docs_link_context_heatmap(self):
         root = Path(__file__).resolve().parents[1]
         docs_index = (root / "docs" / "README.md").read_text(encoding="utf-8")
         capabilities = (root / "docs" / "capabilities.md").read_text(encoding="utf-8")
         context_layer = (root / "docs" / "context-layer.md").read_text(encoding="utf-8")
 
-        self.assertIn("context-heatmap-roadmap.md", docs_index)
+        self.assertIn("context-heatmap.md", docs_index)
         self.assertIn("пассивной диагностики", capabilities)
         self.assertIn("context_packet", context_layer)

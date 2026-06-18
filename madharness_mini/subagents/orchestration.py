@@ -40,9 +40,9 @@ def resolve_orchestration_mode(
 ) -> dict[str, Any]:
     """Сводим config/env/CLI к фактическому режиму оркестрации.
 
-    Старое поле `orchestration_enabled=false` сохраняет смысл выключателя,
-    если новый mode оставлен в `auto`. CLI override считается явным выбором
-    и поэтому не блокируется старым выключателем.
+    Единственный источник правды — `orchestration_mode`. Чтобы полностью
+    выключить делегирование, ставят `off` (или `--no-orchestrate` для
+    разового запуска); явный CLI override имеет приоритет над конфигом.
     """
 
     source = "config"
@@ -55,13 +55,6 @@ def resolve_orchestration_mode(
         raise RuntimeError(
             f"invalid orchestration mode: {configured}; allowed: {allowed}"
         )
-    if (
-        not override
-        and not cfg.data.get("orchestration_enabled", True)
-        and configured == "auto"
-    ):
-        configured = "off"
-        source = "legacy orchestration_enabled"
     requested_by_task = task_requests_orchestration(task)
     effective = configured
     if configured == "requested" and not requested_by_task:

@@ -155,7 +155,6 @@ def run_agent(
         effective=orchestration["effective"],
         source=orchestration["source"],
         requested_by_task=orchestration["requested_by_task"],
-        legacy_enabled=bool(cfg.data.get("orchestration_enabled", True)),
     )
     trace.write(
         "skills_discovered",

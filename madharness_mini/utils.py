@@ -26,7 +26,6 @@ DEFAULT_CONFIG = {
     "context_max_tokens": 60000,
     "context_keep_recent_turns": 3,
     "context_summarize_after_turns": 0,
-    "orchestration_enabled": True,
     "orchestration_mode": "auto",
     "subagent_max_turns": 10,
     "subagent_context_max_tokens": 30000,

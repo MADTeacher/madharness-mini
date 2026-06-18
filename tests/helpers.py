@@ -2,12 +2,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from madharness_mini.config import Config
 
 
 class HarnessTestCase(unittest.TestCase):
     def make_cfg(self):
+        # Тесты не должны зависеть от окружения процесса: `Config.apply_env`
+        # читает переменные с префиксом MADHARNESS_MINI_, поэтому на время
+        # сборки конфига их чистим. Сценарии, проверяющие именно чтение env,
+        # изолируют окружение сами и этот патч перекрывают своим.
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name)
         (root / ".madharness-mini").mkdir()
@@ -15,7 +20,8 @@ class HarnessTestCase(unittest.TestCase):
             json.dumps({"workspace_root": ".", "allow_shell": True}),
             encoding="utf-8",
         )
-        cfg = Config(root)
+        with patch.dict("os.environ", {}, clear=True):
+            cfg = Config(root)
         self.addCleanup(tmp.cleanup)
         return cfg
 

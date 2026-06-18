@@ -228,7 +228,6 @@ madharness-mini subagents validate
 
 | Поле | Значение по умолчанию | Смысл |
 | --- | --- | --- |
-| `orchestration_enabled` | `true` | Устаревший общий выключатель; `false` отключает `delegate_task`, если `orchestration_mode` оставлен в `auto`. |
 | `orchestration_mode` | `auto` | Режим доступности оркестрации: `off`, `requested`, `auto`, `required`. |
 | `subagent_max_turns` | `10` | Лимит ходов субагента без собственного `max_turns`. |
 | `subagent_context_max_tokens` | `30000` | Контекстный бюджет субагента без собственного `context_max_tokens`. |

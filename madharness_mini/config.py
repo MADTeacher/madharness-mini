@@ -91,11 +91,6 @@ class Config:
             key = f"MADHARNESS_MINI_{field.upper()}"
             if env.get(key):
                 self.data[field] = env[key]
-        if env.get("MADHARNESS_MINI_ORCHESTRATION_ENABLED"):
-            self.data["orchestration_enabled"] = parse_bool_env(
-                "MADHARNESS_MINI_ORCHESTRATION_ENABLED",
-                env["MADHARNESS_MINI_ORCHESTRATION_ENABLED"],
-            )
         if env.get("MADHARNESS_MINI_ORCHESTRATION_MODE"):
             mode = env["MADHARNESS_MINI_ORCHESTRATION_MODE"].strip().lower()
             if mode not in ORCHESTRATION_MODE_VALUES:
