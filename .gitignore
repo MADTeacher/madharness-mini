@@ -8,6 +8,7 @@ dist/
 .uv-cache/
 .ruff_cache/
 .playwright-mcp/
+reports/
 
 .DS_Store
 AGENTS.md

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from typing import Any
 
@@ -184,6 +185,10 @@ def run_model_loop(
             )
             return {"status": "done", "result": result, "turns": turn + 1}
         for call in calls:
+            # Берём имя инструмента заранее: если arguments битый и parse_tool_args
+            # упадёт, у нас останется осмысленное имя для observation, а не 'tool_call'.
+            fn = call.get("function") if isinstance(call, dict) else {}
+            call_name = (fn.get("name") if isinstance(fn, dict) else "") or "tool_call"
             try:
                 name, args = parse_tool_args(call)
                 decision = emit_hook(
@@ -205,6 +210,30 @@ def run_model_loop(
                         f"blocked by hook: {decision.block}",
                         hook_blocked=True,
                     )
+            except json.JSONDecodeError as exc:
+                # Модель прислала arguments не валидным JSON — почти всегда это
+                # обрезанная генерация (repetition loop + лимит токенов): строка
+                # остаётся незакрытой. Подсказываем модели, что именно сломалось и
+                # как восстановиться, иначе на следующем ходу она уткнётся в ту же
+                # ошибку, а harness отправит провайдеру битый tool_call.
+                name, args = call_name, {}
+                obs = fail(
+                    name,
+                    f"tool call arguments are not valid JSON: {exc.msg}",
+                    repair_hint=(
+                        "Your previous tool call was truncated (likely a token limit "
+                        "or a repetition loop). Repeat the call with complete, valid "
+                        "JSON arguments. For large files prefer write_file in smaller "
+                        "chunks or apply_patch."
+                    ),
+                )
+                trace.write(
+                    "tool_call_malformed",
+                    turn=turn,
+                    call_id=str(call.get("id") or ""),
+                    tool=name,
+                    error=str(exc),
+                )
             except Exception as exc:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")
@@ -352,6 +381,14 @@ def model_response_summary(raw: dict[str, Any]) -> dict[str, Any]:
     usage = raw.get("usage")
     if not isinstance(usage, dict):
         usage = {}
+    # finish_reason показывал бы, почему модель остановилась ('stop', 'length',
+    # 'tool_calls'). Нас особенно интересует 'length' — признак обрезанной
+    # генерации, которая часто приводит к битому arguments. OpenRouter не всегда
+    # прокидывает поле, поэтому None — нормальное значение, не ошибка.
+    choices = raw.get("choices")
+    finish_reason = None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        finish_reason = choices[0].get("finish_reason")
     return {
         "id": str(raw.get("id") or ""),
         "model": str(raw.get("model") or ""),
@@ -359,6 +396,7 @@ def model_response_summary(raw: dict[str, Any]) -> dict[str, Any]:
         "prompt_tokens": _optional_int(usage.get("prompt_tokens")),
         "completion_tokens": _optional_int(usage.get("completion_tokens")),
         "total_tokens": _optional_int(usage.get("total_tokens")),
+        "finish_reason": finish_reason,
     }
 
 

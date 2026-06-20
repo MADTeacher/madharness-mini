@@ -67,6 +67,10 @@ class Policy:
 
         Запрещаем пайпы, редиректы, sudo, rm -rf и похожие фрагменты;
         allow_shell=false в конфиге отключает shell целиком.
+        Команда выполняется без shell-интерпретатора (через shlex + execve),
+        поэтому фигурные скобки и обратные кавычки тоже запрещены вне кавычек:
+        их раскрыл бы только bash, а без него они ушли бы в программу литералом
+        (например, mkdir создал бы каталог с именем из нераскрытых скобок).
         """
 
         if not self.cfg.data.get("allow_shell", True):
@@ -85,6 +89,20 @@ class Policy:
         ]
         if any(fragment in f" {lowered} " for fragment in denied):
             return False, "risky shell command denied"
+        # Метасимволы, которые раскрывает только shell: brace expansion и
+        # command substitution. Без интерпретатора они становятся мусором в
+        # аргументах. Обратные кавычки блокируем безусловно: в bash command
+        # substitution раскрывается даже внутри двойных кавычек, а литералом
+        # нужна редко. Фигурные скобки — только вне кавычек: внутри одинарных
+        # или двойных bash их не раскрывает, и через execve они нужны литералом
+        # (например, awk '{print $1}'). Глоббинг (*, ?, []) и $VAR намеренно не
+        # блокируем — они часто полезны как литерал для find/grep/awk.
+        if "`" in command or _has_unquoted(command, ["{", "}"]):
+            return (
+                False,
+                "shell metacharacters not supported without a shell: "
+                "pass literal arguments (no brace expansion or command substitution)",
+            )
         try:
             args = shlex.split(command)
         except ValueError as exc:
@@ -94,3 +112,30 @@ class Policy:
         if any(token in command for token in ["|", ">", "<", "&&", "||", ";"]):
             return False, "shell control operators are denied"
         return True, ""
+
+
+def _has_unquoted(command: str, chars: set[str] | list[str]) -> bool:
+    """Есть ли среди символов chars хоть один вне одинарных/двойных кавычек.
+
+    Простой обход строки с учётом переключения режима кавычек (как в bash);
+    экранирование обратной чертой намеренно не учитываем — редкий случай для
+    разрешённых harness-команд, а консервативная проверка безопаснее.
+    """
+
+    target = set(chars)
+    in_single = False
+    in_double = False
+    for ch in command:
+        if in_single:
+            if ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == '"':
+                in_double = False
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch in target:
+            return True
+    return False

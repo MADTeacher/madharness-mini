@@ -435,3 +435,136 @@ class ModelLoopTests(HarnessTestCase):
         self.assertEqual(failed, {})
         self.assertNotIn("retry_hint", obs)
 
+    def test_loop_recovers_from_malformed_arguments_with_repair_hint(self):
+        """Битый arguments (обрезанная генерация) не валит сессию HTTP 400.
+
+        Модель прислала tool_call с arguments не в формате JSON. Loop пишет
+        осмысленный observation с repair_hint и trace-событие tool_call_malformed,
+        а на следующем ходу модель может продолжить работу.
+        """
+
+        cfg = self.make_cfg()
+        seen_messages = []
+
+        def fake_chat(messages, tools=None):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            if len(seen_messages) == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_broken",
+                                        "function": {
+                                            "name": "write_file",
+                                            # Незакрытая строка — типичный обрыв генерации.
+                                            "arguments": '{"content": "unterminated',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": "recovered"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+            result, trace_path = run_agent("write something", cfg)
+
+        # Сессия завершилась normally, без падения.
+        self.assertEqual(result, "recovered")
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        event_types = [event["event"] for event in events]
+        # Новое диагностическое событие появилось.
+        self.assertIn("tool_call_malformed", event_types)
+        # observation несёт человекочитаемую подсказку модели.
+        tool_obs = next(
+            event for event in events if event.get("event") == "tool_observation"
+        )
+        self.assertIn("valid JSON", tool_obs["observation"]["summary"])
+        self.assertIn("repair_hint", tool_obs["observation"])
+        # Критично: в повторный запрос к модели arguments должен быть валидным '{}'.
+        second_request = json.dumps(seen_messages[1])
+        self.assertIn('"arguments": "{}"', second_request)
+        self.assertNotIn("unterminated", second_request)
+
+    def test_finish_reason_is_logged_in_model_call_finished(self):
+        """finish_reason попадает в trace для observability (обрывы генерации)."""
+
+        cfg = self.make_cfg()
+        raw = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        }
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=[raw]):
+            result, trace_path = ask("hello", cfg)
+
+        self.assertEqual(result, "ok")
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        finished = next(
+            event for event in events if event.get("event") == "model_call_finished"
+        )
+        self.assertEqual(finished["model_response"]["finish_reason"], "stop")
+
+    def test_loop_handles_real_truncated_arguments_from_flappy3_trace(self):
+        """Регрессия на реальном кейсе: обрезанный write_file из flappy3.
+
+        Воспроизводит баг с HTTP 400 от Alibaba: модель зашла в repetition loop,
+        упёрлась в лимит токенов, arguments остался незакрытым. Сессия не должна
+        падать, а модель должна получить ремонтную подсказку.
+        """
+
+        cfg = self.make_cfg()
+        # Реальный обрезанный фрагмент из трассы flappy3 (turn 11, write_file).
+        truncated_args = (
+            '{"content": "/**\\n * @fileoverview GameHub — экран выбора игр.'
+        )
+        seen_messages = []
+
+        def fake_chat(messages, tools=None):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            if len(seen_messages) == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_real",
+                                        "function": {
+                                            "name": "write_file",
+                                            "arguments": truncated_args,
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": "recovered after truncation"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+            result, trace_path = run_agent("build gamehub", cfg)
+
+        # Сессия восстановилась, без HTTP 400.
+        self.assertEqual(result, "recovered after truncation")
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        event_types = [event["event"] for event in events]
+        self.assertIn("tool_call_malformed", event_types)
+        # В повторный запрос провайдер не ушёл обрезанный фрагмент.
+        second_request = json.dumps(seen_messages[1])
+        self.assertNotIn("GameHub", second_request)
+        self.assertIn('"arguments": "{}"', second_request)
+

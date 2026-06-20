@@ -56,6 +56,15 @@ workspace-relative cwd such as a skill root when cwd is provided, and times out
 after 60 seconds. It must be a single command: shell control operators such as
 |, >, <, &&, ||, and ; are denied, and risky commands such as sudo, curl, wget,
 ssh, scp, chmod 777, mkfs, dd, and rm -rf are blocked by policy.
+The command runs WITHOUT a shell interpreter: the arguments are split with
+shlex and executed directly. That means shell-only features are NOT available
+and pass through literally if you use them. There is no brace expansion, so
+`mkdir -p {a,b}/c` would create a single directory literally named `{a,b}`;
+there is no command substitution (no backticks), no tilde expansion, and no
+$VAR/${VAR} expansion. Globbing (*, ?, [..]) is also not performed by a shell,
+so patterns reach the program unchanged and are only useful with tools that
+expand them themselves (find, git). Pass concrete literal arguments instead of
+relying on the shell to rewrite the command line.
 run_shell is one-shot only: it blocks until the command exits, so don't use it
 for background, long-running, or parallel processes.
 Do not use run_shell to edit files; use apply_patch for precise edits and write_file
@@ -69,7 +78,7 @@ RUN_SHELL_SPEC = ToolSpec(
         {
             "command": strp(
                 req=True,
-                desc="Single safe command with arguments, run from the workspace root; no shell control operators and no file-editing scripts.",
+                desc="Single safe command with arguments, run from the workspace root; no shell control operators and no file-editing scripts. No shell interpreter: pass literal arguments only — no brace expansion, command substitution, $VAR, or tilde expansion.",
             ),
             "cwd": strp(
                 ".",

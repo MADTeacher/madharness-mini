@@ -252,6 +252,11 @@ class ToolTests(HarnessTestCase):
         self.assertIn("shell control operators", combined)
         self.assertIn("rm -rf", combined)
         self.assertIn("Do not use run_shell to edit files", combined)
+        # Без shell-интерпретатора brace expansion и т.п. не работают — модель
+        # должна знать это из описания, иначе передаст фигурные скобки литералом.
+        self.assertIn("WITHOUT a shell interpreter", combined)
+        self.assertIn("brace expansion", combined)
+        self.assertIn("literal arguments", combined)
 
     def test_run_shell_accepts_workspace_relative_cwd(self):
         cfg = self.make_cfg()
@@ -272,6 +277,8 @@ class ToolTests(HarnessTestCase):
         self.assertIn("`command` argument of `run_shell`", prompt)
         self.assertIn("never use a command itself as a tool name", prompt)
         self.assertIn("same tool returns the same error", prompt)
+        self.assertIn("without a shell interpreter", prompt)
+        self.assertIn("Brace expansion", prompt)
 
     def test_unknown_tool_returns_fail_observation(self):
         obs = ToolRegistry(self.make_cfg()).call("missing_tool", {})

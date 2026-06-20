@@ -538,16 +538,24 @@ def _sanitize_tool_calls(calls: list[Any]) -> list[dict[str, Any]]:
         arguments = function.get("arguments", "{}")
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments, ensure_ascii=False)
-        sanitized.append(
-            {
-                "id": str(call.get("id") or name),
-                "type": str(call.get("type") or "function"),
-                "function": {
-                    "name": name,
-                    "arguments": arguments,
-                },
-            }
-        )
+        # Гарантируем, что в историю не попадёт обрезанный/битый JSON: если модель
+        # упёрлась в лимит токенов внутри строкового литерала, arguments останется
+        # незакрытым, и провайдер отвергнет следующий запрос с HTTP 400. Невалидную
+        # строку заменяем на '{}' и сохраняем обрезок для диагностики в trace.
+        sanitized_call: dict[str, Any] = {
+            "id": str(call.get("id") or name),
+            "type": str(call.get("type") or "function"),
+            "function": {
+                "name": name,
+                "arguments": arguments,
+            },
+        }
+        try:
+            json.loads(arguments)
+        except (ValueError, TypeError):
+            sanitized_call["function"]["arguments"] = "{}"
+            sanitized_call["_malformed_arguments"] = arguments[:500]
+        sanitized.append(sanitized_call)
     return sanitized
 
 

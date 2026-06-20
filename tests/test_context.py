@@ -46,6 +46,37 @@ class ContextManagerTests(HarnessTestCase):
         self.assertIn('"tool_calls"', rendered)
         self.assertIn('\\"path\\": \\"README.md\\"', rendered)
 
+    def test_record_assistant_replaces_malformed_arguments_with_empty_json(self):
+        # Регрессия на HTTP 400 от провайдера: модель обрезала генерацию внутри
+        # строкового литерала, arguments остался незакрытым. Harness не должен
+        # отправлять такой tool_call провайдеру — иначе следующий запрос упадёт с
+        # 'function.arguments must be in JSON format'.
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_broken",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": '{"content": "unterminated',
+                        },
+                    }
+                ],
+            }
+        )
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        # В отправляемом провайдеру сообщении arguments заменён на валидный '{}',
+        # а обрезанный фрагмент и служебный маркер не попадают в API-запрос.
+        self.assertIn('"arguments": "{}"', rendered)
+        self.assertNotIn("unterminated", rendered)
+        self.assertNotIn("_malformed_arguments", rendered)
+
     def test_record_assistant_clips_large_content(self):
         ctx = ContextManager("task", max_tokens=20000)
         ctx.record_assistant({"role": "assistant", "content": "x" * 20000})
