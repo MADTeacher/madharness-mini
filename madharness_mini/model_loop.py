@@ -20,6 +20,11 @@ RATE_LIMIT_RETRY_MAX_SECONDS = 60
 # из-за разового TLS/EOF/timeout, но и не зависать надолго в учебном CLI.
 TRANSIENT_RETRY_DELAYS_SECONDS = (1, 3)
 
+# После стольких неудачных apply_patch по одному пути подсказываем модели, что
+# её память о файле рассинхронизирована, и стоит перечитать файл или сделать
+# write_file целиком. Прерывает дорогой цикл read → apply_patch(fail) → repeat.
+PATCH_RETRY_HINT_THRESHOLD = 2
+
 
 def call_model_with_rate_limit_retry(
     client: ModelClient,
@@ -94,6 +99,11 @@ def run_model_loop(
     kind: str = "run",
 ) -> dict[str, Any]:
     """Ведём модель через ходы assistant/tool до финального результата."""
+
+    # Счётчик неудачных apply_patch по пути за текущий запуск. Успешная правка
+    # сбрасывает счётчик (модель исправилась). При достижении порога в observation
+    # появляется подсказка перечитать файл — прерывает холостой цикл ошибок.
+    failed_patches_by_path: dict[str, int] = {}
 
     for turn in range(max_turns):
         tool_schemas = tools_registry.schemas()
@@ -201,6 +211,7 @@ def run_model_loop(
             followup_messages = obs.pop("_followup_messages", [])
             subagent_stop = obs.pop("_subagent_stop", "")
             apply_hidden_observation_effects(context, trace, obs)
+            _maybe_apply_patch_retry_hint(name, args, obs, failed_patches_by_path)
             trace.write("tool_observation", tool=name, args=args, observation=obs)
             emit_hook(
                 hooks,
@@ -375,6 +386,44 @@ def apply_hidden_observation_effects(
     skill_event = observation.pop("_skill_event", None)
     if skill_event:
         trace.write("skill_activated", **skill_event)
+
+
+def _maybe_apply_patch_retry_hint(
+    tool_name: str,
+    args: dict[str, Any],
+    observation: dict[str, Any],
+    failed_patches_by_path: dict[str, int],
+) -> None:
+    """Следим за неудачными apply_patch и подсказываем модели прервать цикл.
+
+    После PATCH_RETRY_HINT_THRESHOLD неудач по одному пути добавляем в observation
+    поле retry_hint: модель видит, что её память о файле рассинхронизирована, и
+    быстрее переходит к read_file или write_file целиком. Успешная правка путь
+    сбрасывает счётчик. Мутирует observation in-place до записи в trace/историю.
+    """
+
+    if tool_name != "apply_patch":
+        return
+    patch = args.get("patch")
+    if not isinstance(patch, str):
+        return
+    paths = paths_from_patch(patch)
+    if not paths:
+        return
+    observation_ok = bool(observation.get("ok"))
+    for path in paths:
+        if observation_ok:
+            # Модель исправилась — обнуляем счётчик неудач по этому пути.
+            failed_patches_by_path.pop(path, None)
+            continue
+        count = failed_patches_by_path.get(path, 0) + 1
+        failed_patches_by_path[path] = count
+        if count >= PATCH_RETRY_HINT_THRESHOLD:
+            observation["retry_hint"] = (
+                f"apply_patch failed {count} times for {path}; the file likely "
+                "differs from your memory. Use read_file for the current state "
+                "or write_file for the full content."
+            )
 
 
 def is_parent_user_input_request(observation: dict[str, Any]) -> bool:

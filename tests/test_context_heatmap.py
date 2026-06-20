@@ -196,6 +196,50 @@ def _tool_event(
     )
 
 
+def _model_call_with_history(
+    event_id: str,
+    *,
+    turn_id: int,
+    included_entries: list[dict],
+    summarized_indexes: set[int],
+) -> SessionEvent:
+    """model_call с history.included_entries и summarized_old_entries.
+
+    Удобен для тестов cold-gap сигнатур spec_missing и post_summary: эмулирует
+    prompt-пакет, в котором часть записей свернута summarization'ом.
+    """
+
+    summarized_old_entries = [{"index": idx, "kind": "tool_turn"} for idx in summarized_indexes]
+    return SessionEvent(
+        event_id=event_id,
+        session_id="s1",
+        turn_id=turn_id,
+        timestamp=float(turn_id),
+        event_type="model_call",
+        actor="model",
+        payload={
+            "model_call_id": f"s1:{turn_id}",
+            "context_report": {
+                "max_tokens": 60000,
+                "request_tokens_estimate": 1000,
+                "context_packet": {
+                    "version": 1,
+                    "request_tokens_estimate": 1000,
+                    "units": [],
+                    "warnings": [],
+                },
+                "history": {
+                    "included_entries": included_entries,
+                    "summarized_old_entries": summarized_old_entries,
+                    "keep_recent_turns": 3,
+                    "summarize_after_turns": 3,
+                },
+            },
+        },
+        raw_ref={"file": "synthetic.jsonl", "line": turn_id, "offset": None},
+    )
+
+
 class ContextHeatmapTests(HarnessTestCase):
     def test_legacy_trace_is_analyzed_with_low_confidence_warning(self):
         cfg = self.make_cfg()
@@ -707,6 +751,380 @@ class ContextHeatmapTests(HarnessTestCase):
             self.assertIn(path, explanations)
         self.assertNotIn("b.py", explanations)
         self.assertNotIn("moved.py", explanations)
+
+    def test_spec_missing_gap_fires_when_spec_absent_from_window(self):
+        """Правка без спецификации в окне (ТЗ свёрнут или не перечитан)."""
+
+        # Сначала модель читает крупный документ-ТЗ (это делает его спецификацией
+        # по эвристике размера). Затем на ходе правки prompt-пакет не содержит
+        # spec.md: file_refs с read есть, но запись помечена свёрнутой.
+        events = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "read_file",
+                {"path": "spec.md"},
+                {"ok": True, "content": "x" * 2000, "start": 1, "end": 100},
+            ),
+            # model_call того же хода, что и правка: spec.md свёрнут.
+            _model_call_with_history(
+                "s1:evt-000002",
+                turn_id=3,
+                included_entries=[
+                    {"index": 0, "file_refs": [{"kind": "read", "path": "spec.md"}]},
+                ],
+                summarized_indexes={0},
+            ),
+            _tool_event("s1:evt-000003", 3, "write_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        spec_findings = [
+            f for f in findings if "отсутствии спецификации" in f.title
+        ]
+        self.assertEqual(len(spec_findings), 1)
+        self.assertIn("spec.md", spec_findings[0].explanation)
+        self.assertAlmostEqual(spec_findings[0].confidence, 0.72)
+
+    def test_spec_missing_does_not_fire_when_spec_in_window(self):
+        """Если ТЗ присутствует в окне полным read_file — холодной дыры нет."""
+
+        events = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "read_file",
+                {"path": "spec.md"},
+                {"ok": True, "content": "x" * 2000, "start": 1, "end": 100},
+            ),
+            # model_call того же хода, что и правка: spec.md присутствует (read
+            # не свёрнут summarization'ом).
+            _model_call_with_history(
+                "s1:evt-000002",
+                turn_id=3,
+                included_entries=[
+                    {"index": 0, "file_refs": [{"kind": "read", "path": "spec.md"}]},
+                ],
+                summarized_indexes=set(),
+            ),
+            _tool_event("s1:evt-000003", 3, "write_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        self.assertEqual(findings, [])
+
+    def test_post_summary_gap_fires_after_collapsing_read(self):
+        """Правка сразу после summarization критического чтения.
+
+        Отдельный spec-документ нужен, чтобы правимый путь src/app.py не стал
+        спецификацией по размеру — тогда сработает именно post_summary, а не
+        более сильный spec_missing.
+        """
+
+        events = [
+            # spec.md — крупный документ, становится спецификацией.
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "read_file",
+                {"path": "spec.md"},
+                {"ok": True, "content": "x" * 2000, "start": 1, "end": 100},
+            ),
+            # src/app.py — обычный файл, НЕ спецификация (меньше spec.md).
+            _tool_event(
+                "s1:evt-000002",
+                2,
+                "read_file",
+                {"path": "src/app.py"},
+                {"ok": True, "content": "x" * 100, "start": 1, "end": 10},
+            ),
+            # model_call того же хода, что и правка: сворачивает чтение app.py.
+            _model_call_with_history(
+                "s1:evt-000003",
+                turn_id=3,
+                included_entries=[
+                    {"index": 0, "file_refs": [{"kind": "read", "path": "src/app.py"}]},
+                    # spec.md присутствует полным (не свёрнут) — spec_missing
+                    # не должен сработать, уступая место post_summary.
+                    {"index": 1, "file_refs": [{"kind": "read", "path": "spec.md"}]},
+                ],
+                summarized_indexes={0},
+            ),
+            # Первичная правка app.py: known_existing (читали), но повторных
+            # правок ещё не было — repeated_write не сработает. Остаются
+            # spec_missing (нет, spec.md в окне) и post_summary (сработает).
+            _tool_event("s1:evt-000004", 3, "write_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        post_summary = [
+            f for f in findings if "сворачивания чтения" in f.title
+        ]
+        self.assertEqual(
+            len(post_summary),
+            1,
+            f"ожидали post_summary, получили: {[f.title for f in findings]}",
+        )
+        self.assertIn("src/app.py", post_summary[0].explanation)
+
+    def test_post_summary_does_not_fire_after_reread(self):
+        """Если после сворачивания модель перечитала путь — холодной дыры нет."""
+
+        events = [
+            # spec.md отделяет спецификацию от правимого пути.
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "read_file",
+                {"path": "spec.md"},
+                {"ok": True, "content": "x" * 2000, "start": 1, "end": 100},
+            ),
+            _tool_event(
+                "s1:evt-000002",
+                2,
+                "read_file",
+                {"path": "src/app.py"},
+                {"ok": True, "content": "x" * 100, "start": 1, "end": 10},
+            ),
+            _model_call_with_history(
+                "s1:evt-000003",
+                turn_id=3,
+                included_entries=[
+                    {"index": 0, "file_refs": [{"kind": "read", "path": "src/app.py"}]},
+                    {"index": 1, "file_refs": [{"kind": "read", "path": "spec.md"}]},
+                ],
+                summarized_indexes={0},
+            ),
+            # Свежее перечитывание app.py после сворачивания.
+            _tool_event(
+                "s1:evt-000004",
+                4,
+                "read_file",
+                {"path": "src/app.py"},
+                {"ok": True, "content": "y", "start": 1, "end": 1},
+            ),
+            # model_call того же хода, что и правка: spec.md присутствует.
+            _model_call_with_history(
+                "s1:evt-000005",
+                turn_id=5,
+                included_entries=[
+                    {"index": 1, "file_refs": [{"kind": "read", "path": "spec.md"}]},
+                ],
+                summarized_indexes=set(),
+            ),
+            _tool_event("s1:evt-000006", 5, "write_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        post_summary = [f for f in findings if "сворачивания чтения" in f.title]
+        self.assertEqual(post_summary, [])
+
+    def test_read_storm_fires_on_repeated_reads(self):
+        """Аномальная частота повторных чтений одного пути."""
+
+        events = [
+            _tool_event("s1:evt-000001", 1, "read_file", {"path": "src/app.py"}),
+            _tool_event("s1:evt-000002", 2, "read_file", {"path": "src/app.py"}),
+            _tool_event("s1:evt-000003", 3, "read_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        storm = [f for f in findings if "повторных чтений" in f.title]
+        self.assertEqual(len(storm), 1)
+        self.assertEqual(storm[0].severity, "low")
+        self.assertAlmostEqual(storm[0].confidence, 0.55)
+
+    def test_read_storm_does_not_fire_below_threshold(self):
+        """Два чтения (меньше порога 3) — не read_storm."""
+
+        events = [
+            _tool_event("s1:evt-000001", 1, "read_file", {"path": "src/app.py"}),
+            _tool_event("s1:evt-000002", 2, "read_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        storm = [f for f in findings if "повторных чтений" in f.title]
+        self.assertEqual(storm, [])
+
+    def test_apply_patch_storm_fires_on_repeated_failures(self):
+        """Две подряд неудачных apply_patch по пути → apply_patch_storm."""
+
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        events = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "apply_patch",
+                {"patch": patch},
+                {"ok": False, "summary": "expected 1 hunk match, found 0"},
+            ),
+            _tool_event(
+                "s1:evt-000002",
+                2,
+                "apply_patch",
+                {"patch": patch},
+                {"ok": False, "summary": "expected 1 hunk match, found 0"},
+            ),
+        ]
+        findings = detect_cold_gaps(events)
+        storm = [f for f in findings if "неудачных правок" in f.title]
+        self.assertEqual(len(storm), 1)
+        self.assertEqual(storm[0].severity, "low")
+        self.assertAlmostEqual(storm[0].confidence, 0.60)
+        self.assertIn("src/app.py", storm[0].explanation)
+
+    def test_apply_patch_storm_does_not_fire_below_threshold(self):
+        """Одна неудача (меньше порога 2) — не apply_patch_storm."""
+
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        events = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "apply_patch",
+                {"patch": patch},
+                {"ok": False, "summary": "expected 1 hunk match, found 0"},
+            ),
+        ]
+        findings = detect_cold_gaps(events)
+        storm = [f for f in findings if "неудачных правок" in f.title]
+        self.assertEqual(storm, [])
+
+    def test_apply_patch_storm_reset_by_success(self):
+        """Успешная правка сбрасывает счётчик: fail, success, fail — не storm."""
+
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        events = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "apply_patch",
+                {"patch": patch},
+                {"ok": False, "summary": "expected 1 hunk match, found 0"},
+            ),
+            _tool_event(
+                "s1:evt-000002",
+                2,
+                "apply_patch",
+                {"patch": patch},
+                {"ok": True, "summary": "applied patch to 1 file(s)"},
+            ),
+            _tool_event(
+                "s1:evt-000003",
+                3,
+                "apply_patch",
+                {"patch": patch},
+                {"ok": False, "summary": "expected 1 hunk match, found 0"},
+            ),
+        ]
+        findings = detect_cold_gaps(events)
+        storm = [f for f in findings if "неудачных правок" in f.title]
+        self.assertEqual(storm, [])
+
+    def test_dedup_keeps_highest_confidence_per_path(self):
+        """На одну правку берётся одна находка с максимальным confidence."""
+
+        # Повторная правка известного пути без read: repeated_write (0.72)
+        # должен выиграть у более слабых сигнатур на том же event_id+path.
+        events = [
+            _tool_event(
+                "s1:evt-000001",
+                1,
+                "list_files",
+                {"path": "."},
+                {"ok": True, "files": ["src/app.py"]},
+            ),
+            _tool_event("s1:evt-000002", 2, "write_file", {"path": "src/app.py"}),
+            _tool_event("s1:evt-000003", 3, "write_file", {"path": "src/app.py"}),
+        ]
+        findings = detect_cold_gaps(events)
+        # Ровно одна находка на event s1:evt-000003 для src/app.py.
+        write_findings = [
+            f for f in findings if "s1:evt-000003" in f.event_ids
+        ]
+        self.assertEqual(len(write_findings), 1)
+        self.assertAlmostEqual(write_findings[0].confidence, 0.72)
+
+    def test_legacy_trace_without_context_report_does_not_crash(self):
+        """События без context_report/units — детектор не падает."""
+
+        events = [
+            _tool_event("s1:evt-000001", 1, "write_file", {"path": "new.py"}),
+            _tool_event("s1:evt-000002", 2, "write_file", {"path": "new.py"}),
+        ]
+        # Не должно выбросить; repeated_write при этом работает (файл известен).
+        findings = detect_cold_gaps(events)
+        self.assertEqual(len(findings), 1)
+
+    def test_regression_flappy1_has_no_false_positive_gaps(self):
+        """flappy1 (sum=0) — эталон чистоты: 0 холодных дыр."""
+
+        findings = self._flappy_findings("flappy1_sum0.jsonl")
+        self.assertEqual(
+            findings,
+            [],
+            f"flappy1 не должен давать холодных дыр, получили: "
+            f"{[f.title for f in findings]}",
+        )
+
+    def test_regression_flappy2a_catches_spec_loss_after_summary(self):
+        """flappy2 #1: summarization свернул ТЗ → spec_missing на ходах 9+."""
+
+        findings = self._flappy_findings("flappy2a_sum3.jsonl")
+        spec_findings = [
+            f for f in findings if "отсутствии спецификации" in f.title
+        ]
+        self.assertGreaterEqual(
+            len(spec_findings),
+            1,
+            "flappy2 #1 должен ловить потерю спецификации после summarization",
+        )
+        # Все spec_missing находки — на ходах после сворачивания (turn_id >= 9).
+        for finding in spec_findings:
+            self.assertGreaterEqual(
+                finding.turn_id, 9, f"spec_missing на раннем ходе: turn {finding.turn_id}"
+            )
+
+    def test_regression_flappy2b_catches_read_storm(self):
+        """flappy2 #2: модель 36 раз перечитывала файлы → read_storm."""
+
+        findings = self._flappy_findings("flappy2b_sum3.jsonl")
+        storm = [f for f in findings if "повторных чтений" in f.title]
+        self.assertGreaterEqual(
+            len(storm),
+            1,
+            "flappy2 #2 должен ловить аномальную частоту перечитываний",
+        )
+
+    def test_regression_flappy3_keeps_existing_gaps_and_adds_new(self):
+        """flappy3: повторные правки + spec_missing/post_summary + apply_patch_storm."""
+
+        findings = self._flappy_findings("flappy3_sum6.jsonl")
+        titles = [f.title for f in findings]
+        # Существовавшие 2 repeated_write gaps (tetrisGame.js, iGame.js).
+        self.assertTrue(
+            any("без актуального чтения" in t for t in titles),
+            "flappy3 должен сохранить repeated_write gaps",
+        )
+        # Новые сигнатуры: spec_missing или post_summary.
+        new_signatures = [
+            t
+            for t in titles
+            if "отсутствии спецификации" in t or "сворачивания чтения" in t
+        ]
+        self.assertGreaterEqual(
+            len(new_signatures),
+            1,
+            "flappy3 должен ловить новые сигнатуры холодных дыр",
+        )
+        # apply_patch_storm: цикл неудач на tetrisGame.js (5 неудач).
+        self.assertTrue(
+            any("неудачных правок" in t for t in titles),
+            "flappy3 должен ловить apply_patch_storm на tetrisGame.js",
+        )
+
+    def _flappy_findings(self, trace_name: str) -> list:
+        """Запускает detect_cold_gaps на трассе из tests/data/traces/flappy/."""
+
+        trace_path = (
+            Path(__file__).parent / "data" / "traces" / "flappy" / trace_name
+        )
+        events, _warnings = load_trace(trace_path)
+        return detect_cold_gaps(events)
 
     def test_analyze_writes_outputs_and_renders_html_without_secret(self):
         cfg = self.make_cfg()

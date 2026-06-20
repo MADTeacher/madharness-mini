@@ -342,6 +342,22 @@ class ContextManager:
         dirty.sort(key=lambda item: item[1], reverse=True)
         return dirty
 
+    def _read_protected_from_summary(self, path: str | None, read_turn: int) -> bool:
+        """Защищено ли read_file-наблюдение от возрастного сворачивания.
+
+        Путь защищён, если по нему была правка (write/patch) в этом же ходе или
+        позже. Без такой защиты summarization заменяет чтение дайджестом, модель
+        генерирует патч по устаревшему воспоминанию, а harness применяет его к
+        актуальному файлу — цикл неудачных apply_patch (см. apply_patch_storm).
+        """
+
+        if not path:
+            return False
+        state = self._file_state.get(path)
+        if state is None or state.last_write_turn is None:
+            return False
+        return state.last_write_turn >= read_turn
+
     def _file_state_reminder(self) -> ContextFragment | None:
         """Собираем transient-напоминание о файлах, которые правились без read."""
 
@@ -434,8 +450,14 @@ class ContextManager:
                         next(iter(read_paths), None) if tool_name == "read_file" else None
                     )
                     if tool_name == "read_file":
-                        message["content"] = digest_read_file(content, path)
-                        changed = True
+                        # Защита от рассинхронизации: если путь позже правился
+                        # (write/patch в этом же или более свежем ходе), сворачивать
+                        # чтение нельзя — модель будет генерировать патч по старому
+                        # содержимому и получать "expected 1 hunk match, found 0".
+                        # Оставляем полное наблюдение, оплачивая это токенами.
+                        if not self._read_protected_from_summary(path, original_index):
+                            message["content"] = digest_read_file(content, path)
+                            changed = True
                     else:
                         message["content"] = clip_tool_content(content, SUMMARY_TOOL_LIMIT)
                         changed = True

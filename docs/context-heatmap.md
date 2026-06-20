@@ -10,6 +10,22 @@
 `context-heatmap`. В документации ниже `context_heatmap` означает Python-пакет,
 а `context-heatmap` — CLI-команду.
 
+## Запуск через uv
+
+Анализатор входит в тот же пакет, что и сам harness: точка входа
+`context-heatmap` объявлена в `pyproject.toml` рядом с `madharness-mini`.
+Поэтому отдельная установка не нужна — из клона репозитория команду запускает
+`uv run`, который сам поднимает окружение проекта:
+
+```bash
+uv run context-heatmap validate --input .madharness-mini/traces/20260617-120305.jsonl
+```
+
+Команды ниже выполняйте из корня репозитория `madharness-mini`: так `uv`
+находит `pyproject.toml` и среду проекта. Если команда установлена глобально
+через `uv tool install`, префикс `uv run` можно опускать — но в примерах далее
+он указан явно, чтобы примеры работали из коробки в любой рабочей копии.
+
 ## Когда запускать анализатор
 
 Тепловая карта полезна после реального `ask` или `run`, когда нужно понять не
@@ -48,13 +64,13 @@ Trace: .madharness-mini/traces/20260617-120305.jsonl
 Проверьте, что трасса пригодна для анализа:
 
 ```bash
-context-heatmap validate --input .madharness-mini/traces/20260617-120305.jsonl
+uv run context-heatmap validate --input .madharness-mini/traces/20260617-120305.jsonl
 ```
 
 Нормализуйте события в переносимый формат:
 
 ```bash
-context-heatmap normalize \
+uv run context-heatmap normalize \
   --input .madharness-mini/traces/20260617-120305.jsonl \
   --out reports/context-heatmap/20260617-120305/normalized
 ```
@@ -62,7 +78,7 @@ context-heatmap normalize \
 Постройте анализ одной сессии:
 
 ```bash
-context-heatmap analyze \
+uv run context-heatmap analyze \
   --events reports/context-heatmap/20260617-120305/normalized/events.jsonl \
   --out reports/context-heatmap/20260617-120305/session
 ```
@@ -75,7 +91,7 @@ context-heatmap analyze \
 используйте отдельную команду:
 
 ```bash
-context-heatmap render \
+uv run context-heatmap render \
   --report reports/context-heatmap/20260617-120305/session/session_report.json \
   --out reports/context-heatmap/20260617-120305/session/heatmap.html
 ```
@@ -83,7 +99,7 @@ context-heatmap render \
 Для каталога трасс можно сразу построить отчёты по всем `*.jsonl`:
 
 ```bash
-context-heatmap analyze-batch \
+uv run context-heatmap analyze-batch \
   --input .madharness-mini/traces \
   --out reports/context-heatmap/corpus
 ```
@@ -122,7 +138,7 @@ harness.
 ### validate
 
 ```bash
-context-heatmap validate --input .madharness-mini/traces/<trace-id>.jsonl
+uv run context-heatmap validate --input .madharness-mini/traces/<trace-id>.jsonl
 ```
 
 `validate` быстро проверяет, что вход читается и содержит обращения к модели.
@@ -148,7 +164,7 @@ context-heatmap validate --input .madharness-mini/traces/<trace-id>.jsonl
 ### normalize
 
 ```bash
-context-heatmap normalize --input <trace-or-dir> --out <normalized-dir>
+uv run context-heatmap normalize --input <trace-or-dir> --out <normalized-dir>
 ```
 
 `normalize` переводит исходную трассу в общий формат `SessionEvent`. На выходе
@@ -165,7 +181,7 @@ context-heatmap normalize --input <trace-or-dir> --out <normalized-dir>
 ### analyze
 
 ```bash
-context-heatmap analyze --events <normalized-dir>/events.jsonl --out <session-dir>
+uv run context-heatmap analyze --events <normalized-dir>/events.jsonl --out <session-dir>
 ```
 
 `analyze` читает `events.jsonl`, подхватывает соседний `warnings.jsonl`, если он
@@ -176,7 +192,7 @@ context-heatmap analyze --events <normalized-dir>/events.jsonl --out <session-di
 ### render
 
 ```bash
-context-heatmap render --report <session-dir>/session_report.json --out <session-dir>/heatmap.html
+uv run context-heatmap render --report <session-dir>/session_report.json --out <session-dir>/heatmap.html
 ```
 
 `render` пересобирает только HTML по уже готовым файлам отчёта. Команда ожидает,
@@ -188,7 +204,7 @@ context-heatmap render --report <session-dir>/session_report.json --out <session
 ### analyze-batch
 
 ```bash
-context-heatmap analyze-batch --input .madharness-mini/traces --out reports/context-heatmap/corpus
+uv run context-heatmap analyze-batch --input .madharness-mini/traces --out reports/context-heatmap/corpus
 ```
 
 `analyze-batch` проходит по каждому `*.jsonl` во входном каталоге, создаёт
@@ -331,8 +347,43 @@ HTML состоит из трёх вкладок и боковой панели 
 ### Findings
 
 Вкладка Findings показывает предупреждения, которые уже сформулированы для
-человека. MVP сейчас явно ищет cold gaps: например, правку файла без актуального
-`read_file` после предыдущей правки или без доказательства свежего состояния.
+человека. Анализатор ищет cold gaps — действия без свежего доказательства в
+окне. Все такие находки имеют `kind="cold_gap"` и различаются `title` и
+`explanation`, а их `cold_gap_score` агрегируется в `max_cold_gap_score`
+сессии.
+
+Сейчас ловятся четыре класса холодных дыр:
+
+1. **Правка файла без актуального чтения** (`confidence=0.72`) — повторная
+   правка того же пути без `read_file` между правками. Классический сценарий:
+   файл уже существует или уже правился, а свежего чтения перед новой правкой
+   нет. Первичное создание файла сюда не относится: читать ещё нечего.
+2. **Правка при отсутствии спецификации в окне** (`confidence=0.72`) — правка,
+   когда ключевой документ задачи (ТЗ, контракт) отсутствует в текущем
+   prompt-пакете. Документ-спецификацию анализатор выявляет по размеру: крупное
+   чтение до первой правки. Эта сигнатура ловит потерю source-of-truth после
+   summarization: ТЗ сворачивается в дайджест-указатель, а модель продолжает
+   писать код по тающей памяти о задаче.
+3. **Правка после сворачивания чтения summarization'ом** (`confidence=0.70`)
+   — правка сразу после хода, где summarization свернул `read_file` критического
+   документа. Это холодная дыра от возрастной эвикции: harness заменяет
+   содержимое файла указателем «content read earlier», но модель не
+   перечитывает путь и действует без свежего состояния.
+4. **Аномальная частота повторных чтений файла** (`confidence=0.55`,
+   `severity=low`) — путь перечитан ≥3 раз за последние 6 ходов. Это не
+   классический cold gap, а компенсаторное поведение при потере доверия к
+   контексту: summarization ломает память, и модель постоянно перечитывает
+   файлы заново.
+5. **Цикл неудачных правок файла** (`confidence=0.60`, `severity=low`) —
+   `apply_patch` по пути завершился ошибкой ≥2 раз за последние 8 ходов.
+   Симптом рассинхронизации: модель генерирует патч по устаревшему
+   воспоминанию о файле, а harness применяет его к актуальному содержимому,
+   что даёт `expected 1 hunk match, found 0`. Каждый такой оборот — отдельное
+   обращение к модели, поэтому цикл дороже read storm по токенам. Успешная
+   правка путь сбрасывает счётчик.
+
+Если на одну и ту же правку (`event_id` + путь) реагируют сразу несколько
+сигнатур, анализатор оставляет одну находку с наибольшим `cold_gap_score`.
 
 Для каждого finding смотрите:
 
@@ -389,7 +440,11 @@ Context Window. Если заметна большая красная доля, 
 сообщением, чтениями файлов, результатами тестов и ответами инструментов.
 
 `cold_gap_score` — сила сигнала, что перед действием не хватало свежего
-доказательства.
+доказательства. Складывается из пяти классов находок (см. раздел Findings):
+правка без актуального чтения, правка без спецификации в окне, правка после
+сворачивания чтения summarization'ом, аномальная частота перечитываний и цикл
+неудачных правок файла. На ход берётся максимум `cold_gap_score` по всем
+холодным дырам в нём.
 
 `positioned_evidence_score` — насколько удачно расположены доказательства.
 Низкое значение означает, что важные фрагменты могли оказаться в середине

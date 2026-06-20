@@ -14,6 +14,7 @@ from madharness_mini.model import (
     ModelTransientError,
     parse_retry_after,
 )
+from madharness_mini.model_loop import PATCH_RETRY_HINT_THRESHOLD, _maybe_apply_patch_retry_hint
 from madharness_mini.trace import Trace, summarize_trace
 
 from tests.helpers import HarnessTestCase
@@ -379,3 +380,58 @@ class ModelLoopTests(HarnessTestCase):
         self.assertIn("context clipped", second_request)
         self.assertNotIn("x" * 3000, second_request)
         self.assertLess(len(second_request), 10000)
+
+    def test_apply_patch_retry_hint_after_two_failures(self):
+        """Две неудачных apply_patch по пути → во втором observation есть retry_hint."""
+
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        args = {"patch": patch}
+        failed = {}
+        obs1 = {"ok": False, "tool": "apply_patch", "summary": "expected 1 hunk match, found 0"}
+        obs2 = {"ok": False, "tool": "apply_patch", "summary": "expected 1 hunk match, found 0"}
+
+        _maybe_apply_patch_retry_hint("apply_patch", args, obs1, failed)
+        # Первая неудача: подсказки ещё нет, счётчик = 1.
+        self.assertNotIn("retry_hint", obs1)
+        self.assertEqual(failed.get("src/app.py"), 1)
+
+        _maybe_apply_patch_retry_hint("apply_patch", args, obs2, failed)
+        # Вторая неудача: порог достигнут, подсказка появилась.
+        self.assertIn("retry_hint", obs2)
+        self.assertIn("src/app.py", obs2["retry_hint"])
+
+    def test_apply_patch_single_failure_no_hint(self):
+        """Одна неудача — без подсказки (порог не достигнут)."""
+
+        args = {"patch": "*** Update File: a.py\n@@\n-old\n+new\n"}
+        failed = {}
+        obs = {"ok": False, "tool": "apply_patch", "summary": "expected 1 hunk match, found 0"}
+        _maybe_apply_patch_retry_hint("apply_patch", args, obs, failed)
+        self.assertNotIn("retry_hint", obs)
+
+    def test_apply_patch_success_resets_failure_counter(self):
+        """Успешная правка сбрасывает счётчик: после fail, success, fail — без hint."""
+
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        args = {"patch": patch}
+        failed = {}
+        fail_obs = {"ok": False, "tool": "apply_patch", "summary": "hunk mismatch"}
+        success_obs = {"ok": True, "tool": "apply_patch", "summary": "applied patch to 1 file(s)"}
+
+        # fail (count=1), success (сброс → ключ удалён), fail (count=1 снова).
+        _maybe_apply_patch_retry_hint("apply_patch", args, fail_obs, failed)
+        _maybe_apply_patch_retry_hint("apply_patch", args, success_obs, failed)
+        _maybe_apply_patch_retry_hint("apply_patch", args, fail_obs, failed)
+        # Порог (2) не достигнут: подсказки нет, счётчик снова = 1 после сброса.
+        self.assertNotIn("retry_hint", fail_obs)
+        self.assertEqual(failed.get("src/app.py"), 1)
+
+    def test_apply_patch_retry_hint_ignores_other_tools(self):
+        """Не-apply_patch инструменты не затрагивают счётчик."""
+
+        failed = {}
+        obs = {"ok": False, "tool": "write_file", "summary": "boom"}
+        _maybe_apply_patch_retry_hint("write_file", {"path": "a.py"}, obs, failed)
+        self.assertEqual(failed, {})
+        self.assertNotIn("retry_hint", obs)
+

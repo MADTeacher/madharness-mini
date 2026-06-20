@@ -531,3 +531,76 @@ class ContextManagerTests(HarnessTestCase):
         # В отличие от run_shell, read_file не должен давать слепой "context clipped".
         self.assertEqual(rendered.count("context clipped"), 0)
         self.assertEqual(len(summarized), 1)
+
+    def test_summarize_protects_read_of_subsequently_edited_file(self):
+        """Старое чтение файла защищено от сворачивания, если путь позже правился.
+
+        Без этой защиты summarization заменяет чтение дайджестом, модель пишет
+        патч по устаревшему воспоминанию, а harness применяет его к актуальному
+        файлу — возникает цикл неудачных apply_patch (apply_patch_storm).
+        """
+
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_read = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_read]})
+        ctx.record_tool_result(
+            old_read,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read app.py:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("app.py", "read")],
+        )
+        # Правка того же пути позже: теперь чтение защищено от сворачивания.
+        write_call = tool_call("c_write", "write_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [write_call]})
+        ctx.record_tool_result(
+            write_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote app.py"},
+            file_refs=[FileRef("app.py", "write")],
+        )
+        # Три свежих хода выталкивают read за защитное окно.
+        for n in range(3):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # Чтение НЕ свёрнуто в дайджест: полный текст сохранён, цикла ошибок не будет.
+        self.assertNotIn("_context_digested", rendered)
+        self.assertIn("code line", rendered)
+        # Старое чтение не попадает в список свёрнутых.
+        self.assertEqual(summarized, [])
+
+    def test_summarize_still_digests_unedited_read(self):
+        """Чтение без последующей правки сворачивается как раньше (регресс П1)."""
+
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_read = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_read]})
+        ctx.record_tool_result(
+            old_read,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read server.js:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("server.js", "read")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # Чтение свёрнулось в дайджест — правок пути не было, защита П1 не нужна.
+        self.assertIn("_context_digested", rendered)
+        self.assertNotIn("code line", rendered)
+        self.assertEqual(len(summarized), 1)
