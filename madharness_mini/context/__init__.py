@@ -3,6 +3,7 @@
 from .fragments import ContextFragment, ContextProvider, ContextState
 from .history import FileRef, HistoryEntry
 from .manager import ContextManager
+from .summary import ReasoningSummarizer
 
 __all__ = [
     "ContextFragment",
@@ -11,4 +12,5 @@ __all__ = [
     "ContextState",
     "FileRef",
     "HistoryEntry",
+    "ReasoningSummarizer",
 ]

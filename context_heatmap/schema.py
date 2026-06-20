@@ -141,9 +141,16 @@ class TurnHeatRecord:
     red_token_share: float
     stale_token_share: float
     raw_tool_share: float
+    # Доля окна, занятая накопленной историей ответов ассистента. Растёт,
+    # когда summarization не сворачивает assistant_message — отдельный сигнал
+    # window_pressure, не покрывается red_token_share.
+    assistant_share: float
     active_path_purity: float
     evidence_density: float
     cold_gap_score: float
+    # Сила сигнала window_pressure на этом ходе (максимум score по находкам
+    # kind="window_pressure", попавшим в ход). 0 — накопления не зафиксировано.
+    window_pressure_score: float
     positioned_evidence_score: float
     growth_slope: float
     taint_exposure: float

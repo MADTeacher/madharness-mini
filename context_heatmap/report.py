@@ -69,8 +69,10 @@ def write_analysis_outputs(result: AnalysisResult, out_dir: Path) -> None:
             "red_token_share",
             "stale_token_share",
             "raw_tool_share",
+            "assistant_share",
             "evidence_density",
             "cold_gap_score",
+            "window_pressure_score",
             "taint_exposure",
             "fixed_instruction_cost",
             "goal_anchor_cost",
@@ -96,7 +98,9 @@ def render_markdown(result: AnalysisResult) -> str:
         "",
         f"- model calls: {report['model_calls']}",
         f"- max red token share: {report['max_red_token_share']}",
+        f"- max assistant share: {report.get('max_assistant_share', 0)}",
         f"- max cold gap score: {report['max_cold_gap_score']}",
+        f"- max window pressure score: {report.get('max_window_pressure_score', 0)}",
         f"- max fixed instruction cost: {report.get('max_fixed_instruction_cost', 0)}",
         f"- max goal anchor cost: {report.get('max_goal_anchor_cost', 0)}",
         f"- max normative status: {report.get('max_normative_status', 0)}",
@@ -109,7 +113,11 @@ def render_markdown(result: AnalysisResult) -> str:
     ]
     hottest = sorted(
         result.turn_heat,
-        key=lambda item: (item.red_token_share, item.cold_gap_score),
+        key=lambda item: (
+            item.red_token_share,
+            item.cold_gap_score,
+            item.window_pressure_score,
+        ),
         reverse=True,
     )[:5]
     if not hottest:
@@ -118,7 +126,9 @@ def render_markdown(result: AnalysisResult) -> str:
         lines.append(
             "- turn "
             f"{item.turn_id}: red={item.red_token_share}, "
+            f"assist={item.assistant_share}, "
             f"cold={item.cold_gap_score}, "
+            f"pressure={item.window_pressure_score}, "
             f"instruction_cost={item.fixed_instruction_cost}, "
             f"goal_cost={item.goal_anchor_cost}, "
             f"reasons={', '.join(item.top_reasons) or 'none'}"

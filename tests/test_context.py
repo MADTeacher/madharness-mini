@@ -1,6 +1,16 @@
 import json
+import tempfile
+from pathlib import Path
 
-from madharness_mini.context import ContextFragment, ContextManager, FileRef
+from madharness_mini.context import (
+    ContextFragment,
+    ContextManager,
+    ContextState,
+    FileRef,
+)
+from madharness_mini.context.bootstrap import base_context
+from madharness_mini.utils import DEFAULT_CONFIG
+from madharness_mini.workspace_map import WORKSPACE_MAP_ID, WorkspaceMapProvider
 
 from tests.helpers import HarnessTestCase
 
@@ -479,6 +489,10 @@ class ContextManagerTests(HarnessTestCase):
 
         self.assertEqual(dedup_report, [])
 
+    def test_default_config_enables_age_summarization(self):
+        """UT3: возрастная компактизация включена по умолчанию в конфиге harness."""
+        self.assertEqual(DEFAULT_CONFIG["context_summarize_after_turns"], 3)
+
     def test_summarize_after_turns_off_by_default(self):
         """Без параметра старые entries остаются нетронутыми."""
         ctx = ContextManager("task", max_tokens=20000)
@@ -635,3 +649,517 @@ class ContextManagerTests(HarnessTestCase):
         self.assertIn("_context_digested", rendered)
         self.assertNotIn("code line", rendered)
         self.assertEqual(len(summarized), 1)
+
+    def test_summarize_digests_old_write_file_args(self):
+        """Старые аргументы write_file сворачиваются в указатель, тело кода роняется.
+
+        Это основной рычаг против роста assistant-фрагментов: тело файла в
+        tool_calls переотправляется каждый ход. Дайджест сохраняет путь и размер,
+        но не сам код, и подсказывает перечитать файл.
+        """
+        ctx = ContextManager("task", max_tokens=200000, summarize_after_turns=1)
+        old_call = {
+            "id": "c_write",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps(
+                    {"path": "js/main.js", "content": "CODE_BODY\n" + "x" * 2000}
+                ),
+            },
+        }
+        ctx.record_assistant(
+            {"role": "assistant", "content": None, "tool_calls": [old_call]}
+        )
+        ctx.record_tool_result(
+            old_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote js/main.js"},
+            file_refs=[FileRef("js/main.js", "write")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        self.assertIn("_context_digested", rendered)
+        self.assertIn("js/main.js", rendered)
+        self.assertNotIn("CODE_BODY", rendered)
+        self.assertEqual(len(summarized), 1)
+
+    def test_summarize_digests_old_apply_patch_args(self):
+        """Старые аргументы apply_patch сворачиваются: пути сохраняются, тело патча — нет."""
+        ctx = ContextManager("task", max_tokens=200000, summarize_after_turns=1)
+        patch = (
+            "*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+PATCH_BODY "
+            + "y" * 2000
+            + "\n*** End Patch\n"
+        )
+        old_call = {
+            "id": "c_patch",
+            "function": {
+                "name": "apply_patch",
+                "arguments": json.dumps({"patch": patch}),
+            },
+        }
+        ctx.record_assistant(
+            {"role": "assistant", "content": None, "tool_calls": [old_call]}
+        )
+        ctx.record_tool_result(
+            old_call,
+            {"ok": True, "tool": "apply_patch", "summary": "applied patch"},
+            file_refs=[FileRef("app.py", "patch")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertIn("_context_digested", rendered)
+        self.assertIn("app.py", rendered)
+        self.assertNotIn("PATCH_BODY", rendered)
+
+    def test_summarize_keeps_recent_write_file_args(self):
+        """Свежий write_file в защитном окне сохраняет полное тело кода."""
+        ctx = ContextManager(
+            "task", max_tokens=200000, keep_recent_turns=3, summarize_after_turns=1
+        )
+        recent_call = {
+            "id": "c_write",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps(
+                    {"path": "js/main.js", "content": "FRESH_CODE\n" + "x" * 2000}
+                ),
+            },
+        }
+        ctx.record_assistant(
+            {"role": "assistant", "content": None, "tool_calls": [recent_call]}
+        )
+        ctx.record_tool_result(
+            recent_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote js/main.js"},
+            file_refs=[FileRef("js/main.js", "write")],
+        )
+        for n in range(2):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        # Ход внутри keep_recent(3) + summarize(1): тело кода ещё нужно модели.
+        self.assertIn("FRESH_CODE", rendered)
+        self.assertNotIn("_context_digested", rendered)
+
+    def test_digest_and_rolling_summary_compose(self):
+        """Два эшелона работают вместе: дайджест правок + LLM-свёртка старых ходов.
+
+        Дайджест (возрастная свёртка) и накопительная LLM-сводка запускаются в
+        одной сборке messages() и не мешают друг другу: ранние ходы уходят в
+        фрагмент summary:rolling, свежий ход остаётся в рендере целым.
+        """
+
+        class FakeSummarizer:
+            def summarize(self, entries, previous_summary):
+                return "СВОДКА: ранние ходы свёрнуты."
+
+        ctx = ContextManager(
+            "task",
+            max_tokens=200000,
+            keep_recent_turns=1,
+            summarize_after_turns=1,
+            summarizer=FakeSummarizer(),
+            summary_trigger_tokens=10,
+        )
+        for index in range(5):
+            call = {
+                "id": f"c{index}",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps(
+                        {"path": f"f{index}.js", "content": "CODE_BODY\n" + "x" * 800}
+                    ),
+                },
+            }
+            ctx.record_assistant(
+                {"role": "assistant", "content": None, "tool_calls": [call]}
+            )
+            ctx.record_tool_result(
+                call,
+                {"ok": True, "tool": "write_file", "summary": f"wrote f{index}.js"},
+                file_refs=[FileRef(f"f{index}.js", "write")],
+            )
+
+        ctx.messages()  # дайджест + свёртка обновляют состояние
+        ctx.messages()  # публикуем фрагмент summary:rolling
+        report = ctx.report()
+
+        fragment_ids = [fragment["id"] for fragment in report["fragments"]]
+        included_indexes = [
+            entry["index"] for entry in report["history"]["included_entries"]
+        ]
+        self.assertIn("summary:rolling", fragment_ids)
+        # Ранние ходы свёрнуты в сводку, самый свежий остаётся в рендере.
+        self.assertNotIn(0, included_indexes)
+        self.assertIn(4, included_indexes)
+
+    def test_drop_protects_read_of_subsequently_edited_file(self):
+        """UT1: чтение файла, который позже правился, не выбрасывается дропом по
+        бюджету в нефорсированном проходе.
+
+        Без защиты дроп удалил бы актуальное содержимое, и модель вернулась бы к
+        правке вслепую (cold_gap). Единый предикат FL1 защищает такое чтение.
+        """
+        ctx = ContextManager("task", max_tokens=500, keep_recent_turns=1)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        # Ход 0: читаем app.py с уникальным маркером в содержимом.
+        read_call = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [read_call]})
+        ctx.record_tool_result(
+            read_call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read app.py:1-20",
+                "content": "UNIQUE_READ_MARKER\n" + "code line\n" * 20,
+                "start": 1,
+                "end": 20,
+            },
+            file_refs=[FileRef("app.py", "read")],
+        )
+        # Ход 1: правим тот же путь — теперь чтение защищено от эвикции.
+        write_call = tool_call("c_write", "write_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [write_call]})
+        ctx.record_tool_result(
+            write_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote app.py"},
+            file_refs=[FileRef("app.py", "write")],
+        )
+        # Ходы 2..4: объёмные наблюдения, которые надо выбросить ради бюджета.
+        for n in range(3):
+            ctx.record_assistant({"role": "assistant", "content": f"filler {n} " + "x" * 1500})
+        # Ход 5: свежий короткий ход, защищённый keep_recent_turns.
+        ctx.record_assistant({"role": "assistant", "content": "done"})
+
+        messages = ctx.messages()
+        report = ctx.report()
+        dropped = report["history"]["dropped_entries"]
+        dropped_indexes = [item["index"] for item in dropped]
+
+        self.assertTrue(report["truncated"])
+        self.assertGreater(len(dropped_indexes), 0)
+        # Ход чтения app.py (индекс 0) не выброшен, его содержимое осталось.
+        self.assertNotIn(0, dropped_indexes)
+        self.assertNotIn(True, [item.get("forced") for item in dropped])
+        self.assertIn("UNIQUE_READ_MARKER", json.dumps(messages, ensure_ascii=False))
+
+    def test_dedup_protects_read_of_subsequently_edited_file(self):
+        """UT2: read_file грязного файла не сворачивается дедупом.
+
+        Обычно read_file по пути постоянного фрагмента сворачивается правилом
+        path_match. Но если путь позже правился, полный текст ещё нужен модели —
+        защита FL1 оставляет наблюдение целым.
+        """
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.add_fragment(
+            ContextFragment(id="project", source="AGENTS.md", text="# Project rules")
+        )
+        read_call = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [read_call]})
+        ctx.record_tool_result(
+            read_call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read AGENTS.md",
+                "content": "# Project rules full text",
+            },
+            file_refs=[FileRef("AGENTS.md", "read")],
+        )
+        # Правка того же пути позже делает чтение защищённым.
+        write_call = tool_call("c_write", "write_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [write_call]})
+        ctx.record_tool_result(
+            write_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote AGENTS.md"},
+            file_refs=[FileRef("AGENTS.md", "write")],
+        )
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        dedup_report = ctx.report()["history"]["deduped_tool_messages"]
+
+        # Содержимое read_file сохранено, наблюдение не попало в отчёт дедупа.
+        self.assertIn("# Project rules full text", rendered)
+        self.assertNotIn("_context_digested", rendered)
+        self.assertEqual(dedup_report, [])
+
+    def test_dropped_history_publishes_compacted_skeleton_fragment(self):
+        """UT4: выброшенные по бюджету ходы дают фрагмент history:compacted.
+
+        Скелет копится при дропе (после _collect_fragments), поэтому фрагмент
+        появляется на следующей сборке messages() — это и есть проектное
+        поведение (фрагмент входит в исходную оценку бюджета, без рекурсии).
+        """
+        ctx = ContextManager("task", max_tokens=500, keep_recent_turns=1)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        for index in range(8):
+            call = tool_call(f"c{index}", "read_file")
+            ctx.record_assistant(
+                {"role": "assistant", "content": f"step {index} " + "x" * 400}
+            )
+            ctx.record_assistant(
+                {"role": "assistant", "content": None, "tool_calls": [call]}
+            )
+            ctx.record_tool_result(
+                call,
+                {
+                    "ok": True,
+                    "tool": "read_file",
+                    "summary": f"read f{index}",
+                    "content": "x" * 1500,
+                },
+                file_refs=[FileRef(f"f{index}.js", "read")],
+            )
+
+        ctx.messages()  # первый проход выбрасывает старые ходы и копит скелет
+        ctx.messages()  # второй проход публикует фрагмент скелета
+        report = ctx.report()
+
+        fragment_ids = [fragment["id"] for fragment in report["fragments"]]
+        self.assertIn("history:compacted", fragment_ids)
+
+    def test_compacted_skeleton_does_not_duplicate_on_repeat(self):
+        """GT2: повторный messages() без новых записей не удваивает скелет."""
+        ctx = ContextManager("task", max_tokens=500, keep_recent_turns=1)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        for index in range(8):
+            call = tool_call(f"c{index}", "read_file")
+            ctx.record_assistant(
+                {"role": "assistant", "content": f"step {index} " + "x" * 400}
+            )
+            ctx.record_assistant(
+                {"role": "assistant", "content": None, "tool_calls": [call]}
+            )
+            ctx.record_tool_result(
+                call,
+                {
+                    "ok": True,
+                    "tool": "read_file",
+                    "summary": f"read f{index}",
+                    "content": "x" * 1500,
+                },
+                file_refs=[FileRef(f"f{index}.js", "read")],
+            )
+
+        ctx.messages()
+        first_count = len(ctx._dropped_summary)
+        ctx.messages()
+        second_count = len(ctx._dropped_summary)
+
+        # Ключ по original_index делает накопление идемпотентным: повтор не
+        # удваивает скелет. Рост возможен лишь на реально новые дропы (сам
+        # фрагмент-скелет занимает бюджет), но никогда — за счёт дублей.
+        self.assertGreater(first_count, 1)
+        self.assertLess(second_count, first_count * 2)
+        # Каждому свёрнутому ходу соответствует ровно одна строка (нет дублей).
+        fragment = ctx._compacted_history_fragment()
+        skeleton_lines = [
+            line for line in fragment.text.splitlines() if line.startswith("turn ")
+        ]
+        self.assertEqual(len(skeleton_lines), len(ctx._dropped_summary))
+
+    def test_reminder_marks_file_written_without_any_read(self):
+        """UT5: файл, записанный без единого чтения, помечен особо."""
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("fresh.js", "write"))
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertIn("Напоминание о файловом состоянии", rendered)
+        self.assertIn("ни разу не прочитан", rendered)
+        self.assertIn("fresh.js", rendered)
+
+    def test_reminder_separates_stale_after_write_from_never_read(self):
+        """UT5 (доп.): устаревший после правки и ни разу не прочитанный — разные блоки."""
+        ctx = ContextManager("task", max_tokens=20000)
+        # stale_after_write: читали, затем правили.
+        self._record_file_ref(ctx, "c1", FileRef("seen.js", "read"))
+        self._record_file_ref(ctx, "c2", FileRef("seen.js", "write"))
+        # never_read: только правка.
+        self._record_file_ref(ctx, "c3", FileRef("blind.js", "write"))
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertIn("не перечитан после правки", rendered)
+        self.assertIn("ни разу не прочитан", rendered)
+
+    def test_summarizer_folds_old_turns_into_rolling_summary(self):
+        """UT6: при превышении порога старые ходы заменяются summary:rolling."""
+
+        class FakeSummarizer:
+            def summarize(self, entries, previous_summary):
+                return "СВОДКА: предыдущие ходы свёрнуты."
+
+        ctx = ContextManager(
+            "task",
+            max_tokens=20000,
+            keep_recent_turns=1,
+            summarizer=FakeSummarizer(),
+            summary_trigger_tokens=10,
+        )
+        for index in range(5):
+            ctx.record_assistant(
+                {"role": "assistant", "content": f"reasoning {index} " + "x" * 200}
+            )
+
+        ctx.messages()  # свёртка обновляет _rolling_summary и границу
+        ctx.messages()  # публикуем фрагмент summary:rolling
+        report = ctx.report()
+
+        fragment_ids = [fragment["id"] for fragment in report["fragments"]]
+        included_indexes = [
+            entry["index"] for entry in report["history"]["included_entries"]
+        ]
+        self.assertIn("summary:rolling", fragment_ids)
+        # Свёрнутые ранние ходы отсутствуют в рендере, свежий остаётся.
+        self.assertNotIn(0, included_indexes)
+        self.assertIn(4, included_indexes)
+
+    def test_summarizer_failure_keeps_state_unchanged(self):
+        """UT7: исключение суммаризатора не ломает сборку и не меняет состояние."""
+
+        class BrokenSummarizer:
+            def summarize(self, entries, previous_summary):
+                raise RuntimeError("summarizer offline")
+
+        ctx = ContextManager(
+            "task",
+            max_tokens=20000,
+            keep_recent_turns=1,
+            summarizer=BrokenSummarizer(),
+            summary_trigger_tokens=10,
+        )
+        for index in range(5):
+            ctx.record_assistant(
+                {"role": "assistant", "content": f"reasoning {index} " + "x" * 200}
+            )
+
+        messages = ctx.messages()
+        report = ctx.report()
+
+        fragment_ids = [fragment["id"] for fragment in report["fragments"]]
+        self.assertNotIn("summary:rolling", fragment_ids)
+        self.assertEqual(ctx._rolling_summary, "")
+        self.assertEqual(ctx._summarized_upto, 0)
+        # Сборка прошла успешно: все ходы на месте.
+        self.assertIn("reasoning 0", json.dumps(messages, ensure_ascii=False))
+
+    def test_base_context_wires_summarizer_and_trigger(self):
+        """IT1: base_context прокидывает суммаризатор и порог, свёртка работает.
+
+        Интеграция bootstrap → ContextManager: фейковый суммаризатор и
+        положительный порог приводят к фрагменту summary:rolling при длинной
+        истории. Сетевой ModelClient не используется.
+        """
+
+        class FakeSummarizer:
+            def summarize(self, entries, previous_summary):
+                return "СВОДКА: предыдущие ходы свёрнуты."
+
+        cfg = self.make_cfg()
+        ctx = base_context(
+            cfg,
+            "task",
+            summarizer=FakeSummarizer(),
+            summary_trigger_tokens=10,
+        )
+        for index in range(5):
+            ctx.record_assistant(
+                {"role": "assistant", "content": f"reasoning {index} " + "x" * 200}
+            )
+
+        ctx.messages()  # свёртка обновляет накопительную сводку и границу
+        ctx.messages()  # публикуем фрагмент summary:rolling
+        report = ctx.report()
+
+        fragment_ids = [fragment["id"] for fragment in report["fragments"]]
+        self.assertIn("summary:rolling", fragment_ids)
+
+    def test_base_context_summary_not_triggered_for_short_history(self):
+        """Дефолтный порог (45000) — второй эшелон: на короткой истории молчит.
+
+        LLM-свёртка по умолчанию включена консервативно, поэтому обычные короткие
+        run-сессии не платят за вызовы суммаризатора и остаются детерминированными.
+        """
+
+        class TrackingSummarizer:
+            def __init__(self):
+                self.calls = 0
+
+            def summarize(self, entries, previous_summary):
+                self.calls += 1
+                return "не должно вызваться"
+
+        cfg = self.make_cfg()
+        summarizer = TrackingSummarizer()
+        ctx = base_context(cfg, "task", summarizer=summarizer)
+        for index in range(5):
+            ctx.record_assistant(
+                {"role": "assistant", "content": f"reasoning {index} " + "x" * 200}
+            )
+
+        report = ctx.report()
+        fragment_ids = [fragment["id"] for fragment in report["fragments"]]
+        self.assertEqual(summarizer.calls, 0)
+        self.assertNotIn("summary:rolling", fragment_ids)
+
+    def test_default_config_sets_conservative_summary_trigger(self):
+        """Второй эшелон включён по умолчанию консервативным порогом (≈75% бюджета)."""
+        self.assertEqual(DEFAULT_CONFIG["context_summary_trigger_tokens"], 45000)
+
+    def test_workspace_map_limits_lines_and_skips_protected(self):
+        """UT8: карта проекта ограничена по строкам, не содержит .git и secrets."""
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        # Пустой .git достаточно: ignored() исключает его целиком, а sandbox
+        # запрещает запись внутрь каталога с таким именем.
+        (root / ".git").mkdir()
+        (root / "secrets").mkdir()
+        (root / "secrets" / "key.txt").write_text("top", encoding="utf-8")
+        (root / "src").mkdir()
+        for index in range(10):
+            (root / "src" / f"file{index}.py").write_text("x", encoding="utf-8")
+        (root / "README.md").write_text("readme", encoding="utf-8")
+
+        cfg = _StubMapConfig(root)
+        max_entries = 5
+        provider = WorkspaceMapProvider(cfg, depth=3, max_entries=max_entries)
+        state = ContextState(
+            user_task="task",
+            fragments_count=0,
+            history_entries=0,
+            max_tokens=20000,
+            keep_recent_turns=3,
+        )
+
+        fragments = provider.collect(state)
+
+        self.assertEqual(len(fragments), 1)
+        fragment = fragments[0]
+        self.assertEqual(fragment.id, WORKSPACE_MAP_ID)
+        self.assertNotIn(".git", fragment.text)
+        self.assertNotIn("secrets", fragment.text)
+        tree_lines = [
+            line
+            for line in fragment.text.splitlines()
+            if line != "# Карта проекта" and line.strip() != "...truncated"
+        ]
+        self.assertLessEqual(len(tree_lines), max_entries)
+
+
+class _StubMapConfig:
+    """Минимальный Config-подобный объект для WorkspaceMapProvider в тестах."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.data = {"protected_paths": [".git", ".env", "secrets", "~/.ssh"]}

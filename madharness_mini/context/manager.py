@@ -17,12 +17,14 @@ from .budget import (
     clip_text,
     dedup_tool_messages,
     digest_read_file,
+    digest_write_args,
     estimate_request_tokens,
     estimate_tokens,
 )
 from .fragments import ContextFragment, ContextProvider, ContextState
 from .history import FileRef, HistoryEntry
 from .render import render_messages
+from .summary import ReasoningSummarizer
 
 # Полный assistant-текст полезен только до разумного предела: модель уже
 # получила свои рассуждения в прошлом ходе, а следующий запрос платит за них снова.
@@ -35,6 +37,10 @@ ASSISTANT_TOOL_CONTENT_LIMIT = 2000
 # tool-наблюдения усекаем до этих значений, оставляя «скелет» хода для модели.
 SUMMARY_ASSISTANT_LIMIT = 500
 SUMMARY_TOOL_LIMIT = 200
+
+# Аргументы write_file/apply_patch старого хода сворачиваем в указатель, если они
+# крупнее этого порога: тело файла (код) доминирует в стоимости assistant-ходов.
+SUMMARY_TOOLCALL_LIMIT = 200
 
 # Маркер заменяет вложенный блок только в диагностическом goal-anchor hash.
 ATTACHED_DATA_MARKER = "[attached data tracked as a separate context unit]"
@@ -50,6 +56,15 @@ ATTACHED_HEADING_RE = re.compile(
 
 # Идентификатор transient-фрагмента с напоминанием о «грязных» файлах.
 FILE_STATE_REMINDER_ID = "file-state:reminder"
+
+# Идентификатор транзиентного фрагмента-скелета свёрнутой/выброшенной истории.
+COMPACTED_HISTORY_ID = "history:compacted"
+# Скелет не должен расти безгранично: показываем последние ходы и общий лимит.
+COMPACTED_HISTORY_MAX_LINES = 20
+COMPACTED_HISTORY_CAP_CHARS = 1500
+
+# Идентификатор закреплённого фрагмента накопительной LLM-сводки старых ходов.
+ROLLING_SUMMARY_ID = "summary:rolling"
 
 
 @dataclass
@@ -81,6 +96,8 @@ class ContextManager:
         keep_recent_turns: int = 3,
         summarize_after_turns: int = 0,
         providers: Iterable[ContextProvider] | None = None,
+        summarizer: ReasoningSummarizer | None = None,
+        summary_trigger_tokens: int = 0,
     ):
         self.user_task = user_task
         self.max_tokens = max(int(max_tokens), 0)
@@ -90,11 +107,23 @@ class ContextManager:
         # умолчанию), чтобы не менять существующие прогоны учебного харнесса.
         self.summarize_after_turns = max(int(summarize_after_turns), 0)
         self.providers = list(providers or [])
+        # Внешний суммаризатор рассуждений (DIP): менеджер его не создаёт, а
+        # получает извне. Триггер по токеновому порогу истории; 0 — выключено,
+        # чтобы по умолчанию не было платных вызовов и сохранялся детерминизм.
+        self.summarizer = summarizer
+        self.summary_trigger_tokens = max(int(summary_trigger_tokens), 0)
+        # Накопительная LLM-сводка свёрнутых ходов и граница уже свёрнутого:
+        # ходы с original_index < _summarized_upto заменяются фрагментом сводки.
+        self._rolling_summary: str = ""
+        self._summarized_upto: int = 0
         self._fragments: list[ContextFragment] = []
         self._history: list[HistoryEntry] = []
         # Реестр файлового состояния: путь -> последняя read/write правка.
         # Кормит напоминание о «грязных» файлах (гипотеза C) и не пишется в trace.
         self._file_state: dict[str, _FileState] = {}
+        # Скелет свёрнутых/выброшенных ходов: original_index -> компактная строка.
+        # Ключ по индексу делает накопление идемпотентным при повторных messages().
+        self._dropped_summary: dict[int, str] = {}
         self._last_stats: dict[str, int | bool] | None = None
         self._last_report: dict[str, Any] | None = None
 
@@ -171,8 +200,14 @@ class ContextManager:
         entry_indexes = list(range(len(entries)))
         # Дедуп сворачивает избыточные tool-наблюдения (read_file, дублирующий
         # постоянный фрагмент; повторы внутри истории) до оценки бюджета.
-        deduped_tool_messages = dedup_tool_messages(entries, fragments)
+        deduped_tool_messages = dedup_tool_messages(
+            entries, fragments, is_protected_read=self._is_protected_read
+        )
         summarized_old_entries = self._summarize_old_entries(entries, entry_indexes)
+        # LLM-свёртка по токеновому порогу: обновляет накопительную сводку, а
+        # _apply_summary_fold убирает уже свёрнутые ходы из рендера.
+        self._maybe_summarize(entries, entry_indexes)
+        self._apply_summary_fold(entries, entry_indexes)
         messages = render_messages(self.user_task, fragments, entries)
         initial_estimate = estimate_request_tokens(messages, tools)
         initial_tokens = initial_estimate["request_tokens_estimate"]
@@ -342,13 +377,114 @@ class ContextManager:
         dirty.sort(key=lambda item: item[1], reverse=True)
         return dirty
 
-    def _read_protected_from_summary(self, path: str | None, read_turn: int) -> bool:
-        """Защищено ли read_file-наблюдение от возрастного сворачивания.
+    def _dirty_files_by_category(
+        self,
+    ) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+        """Делим грязные файлы на «ни разу не прочитан» и «устарел после правки».
+
+        never_read: была правка, но чтения по пути не было вовсе. stale_after_write:
+        чтение было, но раньше последней правки. Критерий грязного файла совпадает
+        с `_dirty_files`; внутри каждой группы сортируем по убыванию turn правки.
+        """
+
+        never_read: list[tuple[str, int]] = []
+        stale_after_write: list[tuple[str, int]] = []
+        for path, state in self._file_state.items():
+            if state.last_write_turn is None:
+                continue
+            if state.last_read_turn is None:
+                never_read.append((path, state.last_write_turn))
+            elif state.last_read_turn < state.last_write_turn:
+                stale_after_write.append((path, state.last_write_turn))
+        never_read.sort(key=lambda item: item[1], reverse=True)
+        stale_after_write.sort(key=lambda item: item[1], reverse=True)
+        return never_read, stale_after_write
+
+    def _entry_skeleton(self, entry: HistoryEntry) -> str:
+        """Компактный «скелет» одного хода для свёрнутой истории.
+
+        Строка вида `{kind}; tools=[{name} {path?} {ok|fail}, ...]`. Имена берём
+        из assistant.tool_calls (function.name), путь — из file_refs, признак
+        ok|fail — из JSON role=tool наблюдения (поле "ok"). Любая из частей может
+        отсутствовать: тогда подставляем пустую часть, не роняя сборку.
+        """
+
+        names: list[str] = []
+        for message in entry.messages:
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                name = function.get("name") if isinstance(function, dict) else None
+                if isinstance(name, str) and name:
+                    names.append(name)
+        oks: list[bool | None] = []
+        for message in entry.messages:
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            ok_value: bool | None = None
+            if isinstance(content, str):
+                try:
+                    payload = json.loads(content)
+                except (ValueError, TypeError):
+                    payload = None
+                if isinstance(payload, dict) and "ok" in payload:
+                    ok_value = bool(payload.get("ok"))
+            oks.append(ok_value)
+        refs = list(entry.file_refs)
+        parts: list[str] = []
+        count = max(len(names), len(oks), len(refs))
+        for index in range(count):
+            name = names[index] if index < len(names) else ""
+            path = refs[index].path if index < len(refs) else ""
+            ok_value = oks[index] if index < len(oks) else None
+            status = "" if ok_value is None else ("ok" if ok_value else "fail")
+            tool_part = " ".join(piece for piece in (name, path, status) if piece)
+            if tool_part:
+                parts.append(tool_part)
+        return f"{entry.kind}; tools=[{', '.join(parts)}]"
+
+    def _compacted_history_fragment(self) -> ContextFragment | None:
+        """Транзиентный фрагмент-скелет уже свёрнутых/выброшенных ходов.
+
+        Возвращаем None, пока ничего не выброшено. Иначе показываем последние
+        COMPACTED_HISTORY_MAX_LINES строк (по возрастанию индекса хода) и
+        ограничиваем общий размер COMPACTED_HISTORY_CAP_CHARS через clip_text.
+        Фрагмент отдельный, а не замена записи: это исключает рекурсию бюджета и
+        двойной учёт, а ключ-индекс гарантирует идемпотентность накопления.
+        """
+
+        if not self._dropped_summary:
+            return None
+        ordered = sorted(self._dropped_summary.items())[-COMPACTED_HISTORY_MAX_LINES:]
+        lines = ["# Свёрнутые ходы"]
+        for index, skeleton in ordered:
+            lines.append(f"turn {index}: {skeleton}")
+        text = clip_text("\n".join(lines), COMPACTED_HISTORY_CAP_CHARS)
+        return ContextFragment(
+            id=COMPACTED_HISTORY_ID,
+            source="madharness-mini compacted history",
+            text=text,
+            priority=25,
+            placement="system",
+            transient=True,
+            authority_level="harness",
+            context_layer="working",
+            evictability="preferred",
+            stability="turn",
+            applicability="current_task",
+        )
+
+    def _is_protected_read(self, path: str | None, read_turn: int) -> bool:
+        """Защищено ли read_file-наблюдение от любой эвикции контекста.
 
         Путь защищён, если по нему была правка (write/patch) в этом же ходе или
-        позже. Без такой защиты summarization заменяет чтение дайджестом, модель
-        генерирует патч по устаревшему воспоминанию, а harness применяет его к
-        актуальному файлу — цикл неудачных apply_patch (см. apply_patch_storm).
+        позже. Без такой защиты эвикция заменяет чтение дайджестом или роняет
+        его целиком, модель генерирует патч по устаревшему воспоминанию, а
+        harness применяет его к актуальному файлу — цикл неудачных apply_patch
+        (см. apply_patch_storm). Единый предикат переиспользуется в возрастной
+        компактизации, дедупе tool-наблюдений и дропе истории по бюджету.
         """
 
         if not path:
@@ -358,19 +494,51 @@ class ContextManager:
             return False
         return state.last_write_turn >= read_turn
 
-    def _file_state_reminder(self) -> ContextFragment | None:
-        """Собираем transient-напоминание о файлах, которые правились без read."""
+    def _entry_has_protected_read(self, entry: HistoryEntry, read_turn: int) -> bool:
+        """Содержит ли ход защищённое read_file-наблюдение (для дропа по бюджету).
 
-        dirty = self._dirty_files()
-        if not dirty:
+        Ход защищён от удаления в нефорсированном проходе, если читал файл,
+        который позже правился: иначе мы выбросим актуальное содержимое и вернём
+        модель к слепой правке (cold_gap).
+        """
+
+        return any(
+            self._is_protected_read(ref.path, read_turn)
+            for ref in entry.file_refs
+            if ref.kind == "read"
+        )
+
+    def _file_state_reminder(self) -> ContextFragment | None:
+        """Собираем transient-напоминание о файлах, которые правились без read.
+
+        Различаем две категории: устаревшие после правки (читали раньше правки) и
+        ни разу не прочитанные (правка без единого чтения). Для вторых указываем
+        явно вызвать read_file перед правкой — иначе модель правит вслепую.
+        """
+
+        never_read, stale_after_write = self._dirty_files_by_category()
+        if not never_read and not stale_after_write:
             return None
         lines = ["# Напоминание о файловом состоянии"]
-        lines.append(
-            "Эти файлы изменены после последнего чтения. Перед правкой убедитесь, "
-            "что текущее содержимое известно, иначе вызовите read_file:"
-        )
-        for path, turn in dirty:
-            lines.append(f"- {path} (изменён на ходу {turn}, не перечитывался)")
+        if stale_after_write:
+            lines.append(
+                "Эти файлы изменены после последнего чтения. Перед правкой "
+                "убедитесь, что текущее содержимое известно, иначе вызовите read_file:"
+            )
+            for path, turn in stale_after_write:
+                lines.append(
+                    f"- {path} (изменён на ходу {turn}, не перечитан после правки)"
+                )
+        if never_read:
+            lines.append(
+                "Эти файлы записаны без единого чтения — текущее содержимое "
+                "неизвестно:"
+            )
+            for path, turn in never_read:
+                lines.append(
+                    f"- {path} (записан на ходу {turn}, ни разу не прочитан — "
+                    "вызовите read_file перед правкой)"
+                )
         return ContextFragment(
             id=FILE_STATE_REMINDER_ID,
             source="madharness-mini file-state reminder",
@@ -401,6 +569,12 @@ class ContextManager:
         reminder = self._file_state_reminder()
         if reminder is not None:
             fragments.append(reminder)
+        compacted = self._compacted_history_fragment()
+        if compacted is not None:
+            fragments.append(compacted)
+        rolling = self._rolling_summary_fragment()
+        if rolling is not None:
+            fragments.append(rolling)
         return sorted(
             fragments,
             key=lambda item: (item.placement, item.priority, item.id),
@@ -436,9 +610,18 @@ class ContextManager:
             for message in entry.messages:
                 role = message.get("role")
                 content = message.get("content")
-                if role == "assistant" and isinstance(content, str):
-                    if len(content) > SUMMARY_ASSISTANT_LIMIT:
+                if role == "assistant":
+                    if (
+                        isinstance(content, str)
+                        and len(content) > SUMMARY_ASSISTANT_LIMIT
+                    ):
                         message["content"] = clip_text(content, SUMMARY_ASSISTANT_LIMIT)
+                        changed = True
+                    # Сворачиваем тяжёлые аргументы write_file/apply_patch: тело
+                    # файла переотправляется каждый ход и доминирует в стоимости
+                    # старых assistant-ходов. Полный текст лежит на диске —
+                    # дайджест подсказывает перечитать его при необходимости.
+                    if _digest_old_write_tool_calls(message):
                         changed = True
                 elif role == "tool" and isinstance(content, str):
                     if len(content) <= SUMMARY_TOOL_LIMIT:
@@ -455,7 +638,7 @@ class ContextManager:
                         # чтение нельзя — модель будет генерировать патч по старому
                         # содержимому и получать "expected 1 hunk match, found 0".
                         # Оставляем полное наблюдение, оплачивая это токенами.
-                        if not self._read_protected_from_summary(path, original_index):
+                        if not self._is_protected_read(path, original_index):
                             message["content"] = digest_read_file(content, path)
                             changed = True
                     else:
@@ -464,6 +647,93 @@ class ContextManager:
             if changed:
                 summarized.append({"index": original_index, "kind": entry.kind})
         return summarized
+
+    def _maybe_summarize(
+        self,
+        entries: list[HistoryEntry],
+        entry_indexes: list[int],
+    ) -> None:
+        """Сворачиваем старые ходы LLM-сводкой при превышении токенового порога.
+
+        Реализует FL3: работает только при заданном суммаризаторе и положительном
+        пороге. Свёртке подлежит префикс истории за вычетом keep_recent_turns; из
+        него исключаем ходы с защищённым чтением (FL1), чтобы не потерять актуальное
+        состояние файлов. Любое исключение суммаризатора или пустой результат —
+        детерминированный fallback: состояние не меняется. Само удаление свёрнутых
+        ходов из рендера делает _apply_summary_fold.
+        """
+
+        if self.summarizer is None or self.summary_trigger_tokens <= 0:
+            return
+        rendered: list[dict[str, Any]] = []
+        for entry in entries:
+            rendered.extend(entry.rendered_messages())
+        if estimate_tokens(rendered) <= self.summary_trigger_tokens:
+            return
+        foldable_limit = max(len(entries) - self.keep_recent_turns, 0)
+        foldable: list[tuple[HistoryEntry, int]] = []
+        for position in range(foldable_limit):
+            entry = entries[position]
+            index = entry_indexes[position]
+            # Защищённое чтение не сворачиваем: его полный текст ещё нужен модели.
+            if self._entry_has_protected_read(entry, index):
+                continue
+            foldable.append((entry, index))
+        if not foldable:
+            return
+        try:
+            new_summary = self.summarizer.summarize(
+                [entry for entry, _ in foldable], self._rolling_summary
+            )
+        except Exception:
+            # Fallback: при сбое суммаризатора ничего не меняем (A7).
+            return
+        if not new_summary:
+            return
+        self._rolling_summary = new_summary
+        self._summarized_upto = max(index for _, index in foldable) + 1
+
+    def _apply_summary_fold(
+        self,
+        entries: list[HistoryEntry],
+        entry_indexes: list[int],
+    ) -> None:
+        """Убираем из рендера ходы, уже свёрнутые в накопительную сводку.
+
+        Ход исключается, если его original_index < _summarized_upto. Защищённые
+        чтения сохраняем, даже если попали в этот диапазон: их актуальное
+        содержимое нельзя терять (FL1).
+        """
+
+        if self._summarized_upto <= 0:
+            return
+        kept = [
+            (entry, index)
+            for entry, index in zip(entries, entry_indexes)
+            if index >= self._summarized_upto
+            or self._entry_has_protected_read(entry, index)
+        ]
+        entries[:] = [entry for entry, _ in kept]
+        entry_indexes[:] = [index for _, index in kept]
+
+    def _rolling_summary_fragment(self) -> ContextFragment | None:
+        """Закреплённый фрагмент с накопительной LLM-сводкой старых ходов."""
+
+        if not self._rolling_summary:
+            return None
+        return ContextFragment(
+            id=ROLLING_SUMMARY_ID,
+            source="madharness-mini rolling summary",
+            text="# Сводка предыдущих ходов\n\n" + self._rolling_summary,
+            priority=15,
+            placement="system",
+            transient=False,
+            authority_level="harness",
+            context_layer="working",
+            evictability="only_after_validation",
+            stability="session",
+            applicability="current_task",
+        )
 
     def _drop_old_entries_until_budget(
         self,
@@ -488,7 +758,14 @@ class ContextManager:
             > self.max_tokens
         ):
             removable = next(
-                (index for index in range(protected_start) if entries[index]),
+                (
+                    index
+                    for index in range(protected_start)
+                    if entries[index]
+                    and (forced or not self._entry_has_protected_read(
+                        entries[index], entry_indexes[index]
+                    ))
+                ),
                 None,
             )
             if removable is None:
@@ -497,11 +774,45 @@ class ContextManager:
             if forced:
                 report["forced"] = True
             dropped.append(report)
+            # Копим скелет выброшенного хода по его исходному индексу: модель
+            # увидит, что было свёрнуто, а ключ-индекс исключает двойной учёт.
+            self._dropped_summary[entry_indexes[removable]] = self._entry_skeleton(
+                entries[removable]
+            )
             del entries[removable]
             del entry_indexes[removable]
             protected_start = max(len(entries) - keep_recent, 0)
             messages = render_messages(self.user_task, fragments, entries)
         return dropped
+
+
+def _digest_old_write_tool_calls(message: dict[str, Any]) -> bool:
+    """Сворачиваем аргументы write_file/apply_patch у старого assistant-хода.
+
+    Заменяем тело файла (content/patch) дайджестом-указателем, оставляя валидный
+    JSON: иначе провайдер отвергнет следующий запрос. Возвращаем True, если хотя
+    бы один аргумент действительно свернулся — это помечает ход как изменённый
+    для отчёта возрастной свёртки.
+    """
+
+    changed = False
+    for call in message.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if name not in ("write_file", "apply_patch"):
+            continue
+        if not isinstance(arguments, str) or len(arguments) <= SUMMARY_TOOLCALL_LIMIT:
+            continue
+        digested = digest_write_args(arguments, name)
+        if digested != arguments:
+            function["arguments"] = digested
+            changed = True
+    return changed
 
 
 def _sanitize_assistant_message(message: dict[str, Any]) -> dict[str, Any]:

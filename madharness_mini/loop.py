@@ -20,6 +20,7 @@ from .model_loop import (
     safe_context_report,
 )
 from .mcp import McpToolProvider
+from .model_summarizer import ModelReasoningSummarizer
 from .skills import (
     SkillCatalogProvider,
     SkillRuntime,
@@ -36,6 +37,7 @@ from .subagents.orchestration import (
 from .subagents.runner import run_subagent
 from .tools import ToolRegistry
 from .trace import Trace
+from .workspace_map import WorkspaceMapProvider
 
 # Старые тесты и внешние harness-патчи могут подменять `loop.time.sleep`;
 # модуль `time` общий для Python-процесса, поэтому retry в `model_loop` это увидит.
@@ -203,6 +205,15 @@ def run_agent(
         )
     tool_providers.append(McpToolProvider())
 
+    if cfg.data.get("context_workspace_map", True):
+        context_providers.append(
+            WorkspaceMapProvider(
+                cfg,
+                depth=int(cfg.data.get("context_workspace_map_depth", 3)),
+                max_entries=int(cfg.data.get("context_workspace_map_max_entries", 200)),
+            )
+        )
+
     tools_registry = ToolRegistry(
         cfg,
         providers=tool_providers,
@@ -211,7 +222,10 @@ def run_agent(
         allowed_tools=parent_allowed_tools(orchestration["effective"]),
     )
     try:
-        context = base_context(cfg, task, providers=context_providers)
+        summarizer = ModelReasoningSummarizer(client, trace)
+        context = base_context(
+            cfg, task, providers=context_providers, summarizer=summarizer
+        )
         if orchestration["effective"] == "required":
             context.add_fragment(required_orchestration_fragment())
         for name in explicit_skills.names:

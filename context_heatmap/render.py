@@ -150,6 +150,7 @@ def _render(payload: dict) -> str:
     .type-tool_output {{ background: #c23a52; color: #fff; }}
     .type-unknown {{ background: #c9ced6; }}
     .cold {{ display: inline-block; margin-left: 4px; color: #1558d6; font-weight: 700; }}
+    .pressure {{ display: inline-block; margin-left: 4px; color: #b26a00; font-weight: 700; }}
     .finding {{ border-top: 1px solid #eceff3; padding: 10px 0; }}
     .finding:first-child {{ border-top: 0; padding-top: 0; }}
     .sev-critical, .sev-high {{ color: #b3261e; font-weight: 700; }}
@@ -165,6 +166,7 @@ def _render(payload: dict) -> str:
     <div class="metrics">
       <span>model calls: {payload['report'].get('model_calls', 0)}</span>
       <span>max red token share: {payload['report'].get('max_red_token_share', 0)}</span>
+      <span>max assistant share: {payload['report'].get('max_assistant_share', 0)}</span>
       <span>fixed instruction cost: {payload['report'].get('max_fixed_instruction_cost', 0)}</span>
       <span>goal anchor cost: {payload['report'].get('max_goal_anchor_cost', 0)}</span>
       <span>protected status: {payload['report'].get('max_normative_status', 0)}/{payload['report'].get('max_goal_status', 0)}</span>
@@ -753,8 +755,9 @@ def _finding_list(findings: list[dict]) -> str:
         explanation = html.escape(str(finding.get("explanation") or ""))
         recommendation = html.escape(str(finding.get("recommendation") or ""))
         cold = '<span class="cold" title="cold gap">cold</span>' if finding.get("kind") == "cold_gap" else ""
+        pressure = '<span class="pressure" title="window pressure">pressure</span>' if finding.get("kind") == "window_pressure" else ""
         items.append(
-            f'<div class="finding"><div class="sev-{severity}">{severity} {cold}</div>'
+            f'<div class="finding"><div class="sev-{severity}">{severity} {cold}{pressure}</div>'
             f"<strong>{title}</strong><p>{explanation}</p><p>{recommendation}</p></div>"
         )
     return "".join(items)

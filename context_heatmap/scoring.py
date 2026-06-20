@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, deque
 
 from .aggregate import aggregate_turns, session_report
-from .features import detect_cold_gaps, score_fragment
+from .features import detect_cold_gaps, detect_window_pressure, score_fragment
 from .fragments import extract_fragments
 from .packets import reconstruct_packets
 from .schema import AnalysisResult, FragmentHeatRecord, SessionEvent
@@ -76,7 +76,7 @@ def analyze_events(
         recent.append(active_ids)
         recent_counts = Counter(item for packet_ids in recent for item in packet_ids)
 
-    findings = detect_cold_gaps(events)
+    findings = detect_cold_gaps(events) + detect_window_pressure(events)
     turn_heat = aggregate_turns(packets, fragment_heat, findings)
     session_id = events[0].session_id if events else "unknown-session"
     report = session_report(session_id, packets, turn_heat, findings, all_warnings)

@@ -16,6 +16,7 @@ def aggregate_turns(
 
     heat_by_call: dict[str, list[FragmentHeatRecord]] = {}
     cold_by_turn: dict[int, float] = {}
+    pressure_by_turn: dict[int, float] = {}
     for heat in fragment_heat:
         heat_by_call.setdefault(heat.model_call_id, []).append(heat)
     for finding in findings:
@@ -23,6 +24,13 @@ def aggregate_turns(
             cold_by_turn[finding.turn_id] = max(
                 cold_by_turn.get(finding.turn_id, 0.0),
                 float(finding.scores.get("cold_gap_score") or finding.confidence),
+            )
+        elif finding.kind == "window_pressure":
+            pressure_by_turn[finding.turn_id] = max(
+                pressure_by_turn.get(finding.turn_id, 0.0),
+                float(
+                    finding.scores.get("window_pressure_score") or finding.confidence
+                ),
             )
 
     result: list[TurnHeatRecord] = []
@@ -46,6 +54,13 @@ def aggregate_turns(
             fragment.tokens
             for fragment in packet.fragments
             if fragment.source_type == "tool_output"
+        )
+        # Накопленная история ответов ассистента: отдельный сигнал window_pressure,
+        # не покрывается red_token_share (отдельные фрагменты намеренно низкого heat).
+        assistant_tokens = sum(
+            fragment.tokens
+            for fragment in packet.fragments
+            if fragment.source_type == "assistant_message"
         )
         evidence_tokens = sum(
             fragment.tokens
@@ -115,9 +130,13 @@ def aggregate_turns(
                 red_token_share=round(red_tokens / total_tokens, 4),
                 stale_token_share=round(stale_tokens / total_tokens, 4),
                 raw_tool_share=round(raw_tool_tokens / total_tokens, 4),
+                assistant_share=round(assistant_tokens / total_tokens, 4),
                 active_path_purity=1.0,
                 evidence_density=round(evidence_tokens / total_tokens, 4),
                 cold_gap_score=round(cold_by_turn.get(packet.turn_id, 0.0), 4),
+                window_pressure_score=round(
+                    pressure_by_turn.get(packet.turn_id, 0.0), 4
+                ),
                 positioned_evidence_score=round(
                     1.0
                     - max(
@@ -199,6 +218,18 @@ def session_report(
         "max_cold_gap_score": max(
             (item.cold_gap_score for item in turn_heat),
             default=0.0,
+        ),
+        "max_window_pressure_score": max(
+            (item.window_pressure_score for item in turn_heat),
+            default=0.0,
+        ),
+        "max_assistant_share": max(
+            (item.assistant_share for item in turn_heat),
+            default=0.0,
+        ),
+        "mean_assistant_share": round(
+            sum(item.assistant_share for item in turn_heat) / max(len(turn_heat), 1),
+            4,
         ),
         "max_fixed_instruction_cost": max(
             (item.fixed_instruction_cost for item in turn_heat),

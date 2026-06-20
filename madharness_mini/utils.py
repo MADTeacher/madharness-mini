@@ -25,7 +25,15 @@ DEFAULT_CONFIG = {
     "max_turns": 50,
     "context_max_tokens": 60000,
     "context_keep_recent_turns": 3,
-    "context_summarize_after_turns": 0,
+    "context_summarize_after_turns": 3,
+    # Второй эшелон сжатия: при росте истории сверх порога старые незащищённые
+    # ходы сворачиваются в накопительную LLM-сводку. Консервативное значение
+    # (75% от context_max_tokens) держит свёртку редкой — она включается только
+    # на действительно длинных run-сессиях. 0 полностью отключает LLM-вызовы.
+    "context_summary_trigger_tokens": 45000,
+    "context_workspace_map": True,
+    "context_workspace_map_depth": 3,
+    "context_workspace_map_max_entries": 200,
     "orchestration_mode": "auto",
     "subagent_max_turns": 10,
     "subagent_context_max_tokens": 30000,

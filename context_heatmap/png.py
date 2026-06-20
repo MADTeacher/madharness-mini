@@ -209,6 +209,7 @@ def _column_payload(
         "used_tokens": max(min(used_tokens, max(window_tokens, 1)), 0),
         "tokens_by_type": tokens_by_type,
         "raw_tool_share": _safe_float(heat.get("raw_tool_share")),
+        "assistant_share": _safe_float(heat.get("assistant_share")),
         "evidence_density": _safe_float(heat.get("evidence_density")),
         "positioned_evidence_score": _safe_float(
             heat.get("positioned_evidence_score"),
@@ -244,6 +245,7 @@ def _draw_header(
         f"PROT {float(report.get('max_normative_status') or 0):.2f}/"
         f"{float(report.get('max_goal_status') or 0):.2f}  "
         f"COLD {float(report.get('max_cold_gap_score') or 0):.2f}  "
+        f"ASST {float(report.get('max_assistant_share') or 0):.2f}  "
         f"FINDINGS {int(report.get('findings') or 0)}"
     )
     canvas.text(32, 52, metrics, MUTED, scale=1)
@@ -360,6 +362,7 @@ def _draw_sparklines(
     canvas.text(x, y - 22, "TURN SIGNALS", TEXT, scale=1)
     metrics = [
         ("TOOL", "raw_tool_share", (194, 58, 82)),
+        ("ASST", "assistant_share", SOURCE_COLORS["assistant_message"]),
         ("EVID", "evidence_density", (100, 180, 93)),
         ("POS", "positioned_evidence_score", (86, 166, 217)),
         ("NORM", "normative_status", WARNING),

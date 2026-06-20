@@ -9,6 +9,7 @@ dist/
 .ruff_cache/
 .playwright-mcp/
 reports/
+.agent-plans/
 
 .DS_Store
 AGENTS.md

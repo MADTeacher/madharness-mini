@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 
 from context_heatmap.cli import main as heatmap_main
-from context_heatmap.features import detect_cold_gaps, score_fragment
+from context_heatmap.features import detect_cold_gaps, detect_window_pressure, score_fragment
 from context_heatmap.io import read_jsonl
 from context_heatmap.loaders.madharness_trace import load_trace
 from context_heatmap.normalize import load_normalized_events
@@ -1050,6 +1050,180 @@ class ContextHeatmapTests(HarnessTestCase):
         findings = detect_cold_gaps(events)
         self.assertEqual(len(findings), 1)
 
+    def test_window_pressure_fires_when_assistant_share_grows(self):
+        """Накопление истории ассистента с ростом доли → finding window_pressure.
+
+        Три model_call: доля assistant_message 30% → 50% → 65%. Срабатывает
+        на ходах 1 и 2 (рост выше порога 0.40 + прирост ≥ 0.02). На ходе 0
+        базы для сравнения роста нет.
+        """
+
+        events = [
+            _model_call_event(
+                "s1",
+                "s1:0",
+                [
+                    _unit("sys", "system_instruction", 300),
+                    _unit("a0", "assistant_message", 300),
+                    _unit("t0", "tool_output", 400),
+                ],
+                turn_id=0,
+            ),
+            _model_call_event(
+                "s1",
+                "s1:1",
+                [
+                    _unit("sys", "system_instruction", 300),
+                    _unit("a0", "assistant_message", 500),
+                    _unit("a1", "assistant_message", 500),
+                    _unit("t0", "tool_output", 200),
+                ],
+                turn_id=1,
+            ),
+            _model_call_event(
+                "s1",
+                "s1:2",
+                [
+                    _unit("sys", "system_instruction", 300),
+                    _unit("a0", "assistant_message", 650),
+                    _unit("a1", "assistant_message", 650),
+                ],
+                turn_id=2,
+            ),
+        ]
+        findings = detect_window_pressure(events)
+        self.assertEqual(
+            len(findings), 2, f"ожидали 2 находки, получили: {[f.title for f in findings]}"
+        )
+        # Все находки — нового класса, на ходах после первого.
+        for finding in findings:
+            self.assertEqual(finding.kind, "window_pressure")
+            self.assertEqual(finding.severity, "medium")
+            self.assertIn(finding.turn_id, {1, 2})
+            self.assertAlmostEqual(finding.confidence, 0.70)
+            self.assertGreaterEqual(finding.scores["assistant_share"], 0.40)
+
+    def test_window_pressure_does_not_fire_on_plateau(self):
+        """Стабильная высокая доля (без роста) → находка не срабатывает.
+
+        Доля assistant_message 60% на всех ходах: условие роста не выполнено.
+        """
+
+        events = [
+            _model_call_event(
+                "s1",
+                "s1:0",
+                [
+                    _unit("sys", "system_instruction", 400),
+                    _unit("a0", "assistant_message", 600),
+                ],
+                turn_id=0,
+            ),
+            _model_call_event(
+                "s1",
+                "s1:1",
+                [
+                    _unit("sys", "system_instruction", 400),
+                    _unit("a0", "assistant_message", 600),
+                ],
+                turn_id=1,
+            ),
+            _model_call_event(
+                "s1",
+                "s1:2",
+                [
+                    _unit("sys", "system_instruction", 400),
+                    _unit("a0", "assistant_message", 600),
+                ],
+                turn_id=2,
+            ),
+        ]
+        findings = detect_window_pressure(events)
+        self.assertEqual(findings, [])
+
+    def test_window_pressure_does_not_fire_below_share_threshold(self):
+        """Доля ниже 0.40 даже при росте → находка не срабатывает."""
+
+        events = [
+            _model_call_event(
+                "s1",
+                "s1:0",
+                [
+                    _unit("sys", "system_instruction", 800),
+                    _unit("a0", "assistant_message", 100),
+                    _unit("t0", "tool_output", 100),
+                ],
+                turn_id=0,
+            ),
+            _model_call_event(
+                "s1",
+                "s1:1",
+                [
+                    _unit("sys", "system_instruction", 800),
+                    _unit("a0", "assistant_message", 200),
+                ],
+                turn_id=1,
+            ),
+        ]
+        findings = detect_window_pressure(events)
+        self.assertEqual(findings, [])
+
+    def test_window_pressure_legacy_trace_returns_empty(self):
+        """model_call без context_packet.units → детектор молчит, не падает."""
+
+        events = [
+            _tool_event("s1:evt-000001", 1, "read_file", {"path": "app.py"}),
+            _tool_event("s1:evt-000002", 2, "write_file", {"path": "app.py"}),
+        ]
+        self.assertEqual(detect_window_pressure(events), [])
+
+    def test_window_pressure_wired_into_analysis_and_session_report(self):
+        """Сквозная проверка: assistant_share в turn_heat, метрики в session_report."""
+
+        events = [
+            _model_call_event(
+                "s1",
+                "s1:0",
+                [
+                    _unit("sys", "system_instruction", 300),
+                    _unit("a0", "assistant_message", 300),
+                    _unit("t0", "tool_output", 400),
+                ],
+                turn_id=0,
+            ),
+            _model_call_event(
+                "s1",
+                "s1:1",
+                [
+                    _unit("sys", "system_instruction", 300),
+                    _unit("a0", "assistant_message", 1000),
+                    _unit("a1", "assistant_message", 500),
+                ],
+                turn_id=1,
+            ),
+        ]
+        result = analyze_events(events)
+
+        # turn_heat несёт новую колонку assistant_share.
+        self.assertEqual(len(result.turn_heat), 2)
+        self.assertGreater(result.turn_heat[0].assistant_share, 0.0)
+        self.assertGreater(result.turn_heat[1].assistant_share, 0.40)
+        # window_pressure_score проставлен на ходе 1, где сработал детектор.
+        self.assertEqual(result.turn_heat[0].window_pressure_score, 0.0)
+        self.assertGreater(result.turn_heat[1].window_pressure_score, 0.0)
+        # session_report агрегирует новые метрики.
+        report = result.session_report
+        self.assertIn("max_assistant_share", report)
+        self.assertIn("mean_assistant_share", report)
+        self.assertIn("max_window_pressure_score", report)
+        self.assertGreater(report["max_assistant_share"], 0.40)
+        self.assertGreater(report["max_window_pressure_score"], 0.0)
+        # Находка попала в общий список findings.
+        self.assertTrue(
+            any(f.kind == "window_pressure" for f in result.findings),
+            f"ожидали window_pressure в findings: {[f.kind for f in result.findings]}",
+        )
+
     def test_regression_flappy1_has_no_false_positive_gaps(self):
         """flappy1 (sum=0) — эталон чистоты: 0 холодных дыр."""
 
@@ -1220,10 +1394,10 @@ class ContextHeatmapTests(HarnessTestCase):
         self.assertEqual(
             (out_dir / "turn_heat.csv").read_text(encoding="utf-8").splitlines()[0],
             "session_id,model_call_id,turn_id,red_token_share,stale_token_share,"
-            "raw_tool_share,evidence_density,cold_gap_score,taint_exposure,"
-            "fixed_instruction_cost,goal_anchor_cost,normative_status,goal_status,"
-            "instruction_scope_score,goal_supersession_score,"
-            "attached_data_taint_score,top_reasons",
+            "raw_tool_share,assistant_share,evidence_density,cold_gap_score,"
+            "window_pressure_score,taint_exposure,fixed_instruction_cost,"
+            "goal_anchor_cost,normative_status,goal_status,instruction_scope_score,"
+            "goal_supersession_score,attached_data_taint_score,top_reasons",
         )
         self.assertIn("heatmap-data", html)
         self.assertIn("cold", html)

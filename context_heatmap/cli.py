@@ -232,6 +232,14 @@ def _analyze_batch(input_path: Path, out_dir: Path) -> None:
                 (item.get("max_cold_gap_score", 0.0) for item in corpus),
                 default=0.0,
             ),
+            "max_assistant_share": max(
+                (item.get("max_assistant_share", 0.0) for item in corpus),
+                default=0.0,
+            ),
+            "max_window_pressure_score": max(
+                (item.get("max_window_pressure_score", 0.0) for item in corpus),
+                default=0.0,
+            ),
         },
     )
     print(f"analyzed sessions: {len(corpus)}")

@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any
 
+from ..utils import paths_from_patch
 from .fragments import ContextFragment
 from .history import HistoryEntry
 
@@ -100,6 +102,7 @@ def clip_text(text: str, limit: int) -> str:
 def dedup_tool_messages(
     entries: list[HistoryEntry],
     fragments: list[ContextFragment],
+    is_protected_read: Callable[[str, int], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Сворачиваем избыточные role=tool наблюдения в краткие сводки.
 
@@ -113,6 +116,11 @@ def dedup_tool_messages(
 
     Пути берём из entry.file_refs (надёжно), а не из парсинга summary. Возвращает
     описания свёрнутых сообщений для отчёта трассы, мутирует content in-place.
+
+    is_protected_read — единый предикат защиты чтения (FL1). Если задан и вернул
+    True для пары (path, turn) read_file-наблюдения, такое чтение не сворачивается:
+    файл позже правился, и полный текст ещё нужен модели. При None поведение
+    прежнее.
     """
 
     constant_sources = {
@@ -149,6 +157,16 @@ def dedup_tool_messages(
             # Для read_file строим дайджест-указатель (путь + диапазон строк),
             # а не обрезок текста: модель сохраняет знание, что и где читала.
             read_path = _read_file_path(content, path_kinds, rule)
+            # Защита актуального чтения: если это read_file по пути, который позже
+            # правился, оставляем полное наблюдение — иначе модель будет править
+            # файл по устаревшему дайджесту (cold_gap).
+            if (
+                is_protected_read is not None
+                and read_path is not None
+                and _is_read_file_observation(content)
+                and is_protected_read(read_path, turn)
+            ):
+                continue
             shortened = _dedup_summary(message, content, rule, read_path)
             message["content"] = shortened
             deduped.append(
@@ -196,6 +214,59 @@ def digest_read_file(content: str, path: str | None) -> str:
     compact["_context_digested"] = True
     compact["note"] = "content read earlier; call read_file for the current state"
     return json.dumps(compact, ensure_ascii=False)
+
+
+def digest_write_args(arguments: str, tool_name: str) -> str:
+    """Осмысленный дайджест аргументов старого write_file/apply_patch.
+
+    Тело файла (content у write_file, patch у apply_patch) — это обычно весь код,
+    который модель уже применила к диску. В истории он переотправляется каждый ход
+    и доминирует в стоимости assistant-сообщений (см. анализ тепловых карт). По
+    аналогии с digest_read_file сохраняем указатель — путь(и) и размер payload —
+    но роняем сам текст, оставляя валидный JSON и подсказку перечитать файл. При
+    неразборном JSON или отсутствии тела возвращаем исходную строку: лучше оставить
+    как есть, чем сломать запрос к провайдеру обрезанным JSON.
+    """
+
+    try:
+        payload = json.loads(arguments)
+    except (ValueError, TypeError):
+        return arguments
+    if not isinstance(payload, dict):
+        return arguments
+    if tool_name == "write_file":
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return arguments
+        compact: dict[str, Any] = {"_context_digested": True, "tool": "write_file"}
+        path = payload.get("path")
+        if isinstance(path, str) and path:
+            compact["path"] = path
+        compact["content_chars"] = len(content)
+        compact["note"] = "content written earlier; call read_file for the current state"
+        return json.dumps(compact, ensure_ascii=False)
+    if tool_name == "apply_patch":
+        patch = payload.get("patch")
+        if not isinstance(patch, str):
+            return arguments
+        compact = {"_context_digested": True, "tool": "apply_patch"}
+        paths = paths_from_patch(patch)
+        if paths:
+            compact["paths"] = paths
+        compact["patch_chars"] = len(patch)
+        compact["note"] = "patch applied earlier; call read_file for the current state"
+        return json.dumps(compact, ensure_ascii=False)
+    return arguments
+
+
+def _is_read_file_observation(content: str) -> bool:
+    """Истинно, если JSON-наблюдение принадлежит инструменту read_file."""
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and payload.get("tool") == "read_file"
 
 
 def _read_file_path(content: str, path_kinds: dict[str, str], rule: str) -> str | None:

@@ -384,6 +384,20 @@ SPEC_TOKENS_FACTOR = 3.0
 SPEC_MIN_READS_FOR_MEDIAN = 3
 SPEC_ABSOLUTE_MIN_CHARS = 1000
 
+# Пороги сигнала window_pressure: накопление истории ответов ассистента в окне
+# без summarization/компрессии. red_token_share здесь слеп: отдельные
+# assistant_message-фрагменты намеренно низкого heat, поэтому общую долю
+# считаем отдельно и ловим именно рост — не стационарное удержание.
+# Порог доли assistant_message в окне, после которого история становится
+# подозрительной: модель рискует потерять доказательства в шуме собственных
+# ответов. 0.40 — начало опасной зоны по данным учебных трасс (50–70%+).
+WINDOW_PRESSURE_ASSISTANT_SHARE = 0.40
+# Минимальный прирост доли к предыдущему ходу, чтобы отличить рост от
+# plateau. Стабильно занятое окно — не сигнал, сигнал — накопление без свёртки.
+WINDOW_PRESSURE_MIN_GROWTH = 0.02
+# Базовая confidence/severity-score находки window_pressure.
+WINDOW_PRESSURE_SCORE = 0.70
+
 
 @dataclass(frozen=True)
 class WindowIndex:
@@ -516,6 +530,107 @@ def detect_cold_gaps(events: list[SessionEvent]) -> list[Finding]:
                 raw_findings.append(candidate)
 
     return raw_findings
+
+
+def _assistant_shares_by_turn(
+    events: list[SessionEvent],
+) -> list[tuple[int, float, str, SessionEvent]]:
+    """Доля assistant_message в окне по каждому model_call-ходу.
+
+    Возвращает список `(turn_id, assistant_share, event_id, event)` в порядке
+    model_call-событий. Берём tokens из `context_packet.units`: для каждого unit
+    с `source_type == "assistant_message"` суммируем `tokens_estimate`, а
+    знаменатель — сумма всех unit-ов (или `input_tokens`, если units пустые).
+    Legacy-трассы без context_packet дают пустой список — детектор молчит.
+    """
+
+    shares: list[tuple[int, float, str, SessionEvent]] = []
+    for event in events:
+        if event.event_type != "model_call":
+            continue
+        report = event.payload.get("context_report")
+        if not isinstance(report, dict):
+            continue
+        packet = report.get("context_packet")
+        if not isinstance(packet, dict):
+            continue
+        units = packet.get("units")
+        if not isinstance(units, list) or not units:
+            continue
+        assistant_tokens = 0
+        total_tokens = 0
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            # tokens_estimate уже проверен валидатором как неотрицательное int.
+            tokens = unit.get("tokens_estimate")
+            if not isinstance(tokens, int) or isinstance(tokens, bool):
+                continue
+            total_tokens += tokens
+            if unit.get("source_type") == "assistant_message":
+                assistant_tokens += tokens
+        if total_tokens <= 0:
+            continue
+        shares.append(
+            (event.turn_id, assistant_tokens / total_tokens, event.event_id, event)
+        )
+    return shares
+
+
+def detect_window_pressure(events: list[SessionEvent]) -> list[Finding]:
+    """Ловим накопление истории ассистента в окне без summarization.
+
+    Сигнал `kind="window_pressure"` срабатывает, когда доля `assistant_message`
+    превысила порог и продолжает расти к предыдущему обращению к модели. Так мы
+    отличаем накопление без свёртки от стационарного удержания: plateau не
+    сигналит, рост — сигналит. red_token_share здесь слеп, т.к. отдельные
+    assistant_message-фрагменты намеренно низкого heat.
+    """
+
+    shares = _assistant_shares_by_turn(events)
+    findings: list[Finding] = []
+    counter = 1
+    previous_share: float | None = None
+    for turn_id, share, event_id, event in shares:
+        # Рост считаем только от предыдущего хода: на первом обращении базы нет.
+        if previous_share is not None:
+            growth = share - previous_share
+            if (
+                share >= WINDOW_PRESSURE_ASSISTANT_SHARE
+                and growth >= WINDOW_PRESSURE_MIN_GROWTH
+            ):
+                finding = Finding(
+                    finding_id=f"find-{counter:03d}",
+                    session_id=event.session_id,
+                    turn_id=turn_id,
+                    severity="medium",
+                    kind="window_pressure",
+                    title="Накопление истории ассистента в окне",
+                    explanation=(
+                        f"Доля `assistant_message` в окне выросла до "
+                        f"{share:.0%} (прирост {growth:+.0%} к предыдущему "
+                        f"обращению). История ответов ассистента копится "
+                        f"без summarization/компрессии и вытесняет доказательства."
+                    ),
+                    fragment_ids=[],
+                    event_ids=[event_id],
+                    recommendation=(
+                        "Включить или усилить summarization истории диалога "
+                        "(сворачивать не только tool-обороты, но и assistant-"
+                        "сообщения), либо перечитывать критичные файлы ближе "
+                        "к правке, чтобы держать доказательства в окне."
+                    ),
+                    confidence=WINDOW_PRESSURE_SCORE,
+                    scores={
+                        "window_pressure_score": WINDOW_PRESSURE_SCORE,
+                        "assistant_share": round(share, 4),
+                        "assistant_growth": round(growth, 4),
+                    },
+                )
+                findings.append(finding)
+                counter += 1
+        previous_share = share
+    return findings
 
 
 def _best_write_finding(

@@ -8,6 +8,7 @@ from ..config import Config
 from ..instructions import load_project_instructions, load_prompt
 from .fragments import ContextFragment, ContextProvider
 from .manager import ContextManager
+from .summary import ReasoningSummarizer
 
 
 def base_context(
@@ -16,12 +17,15 @@ def base_context(
     providers: Iterable[ContextProvider] | None = None,
     *,
     max_tokens: int | None = None,
+    summarizer: ReasoningSummarizer | None = None,
+    summary_trigger_tokens: int | None = None,
 ) -> ContextManager:
     """Готовим слой контекста для ask/run: system, AGENTS.md и задача.
 
     Сам ContextManager не читает файлы и не знает про Config. Bootstrap передаёт
     ему уже готовый системный текст, чтобы граница слоя контекста оставалась
-    простой.
+    простой. Внешний суммаризатор (DIP) и токеновый порог опциональны: если порог
+    не задан явно, берём его из cfg.data (по умолчанию 0 — LLM-свёртка выключена).
     """
 
     context = ContextManager(
@@ -32,8 +36,14 @@ def base_context(
             else int(cfg.data.get("context_max_tokens", 60000))
         ),
         keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
-        summarize_after_turns=int(cfg.data.get("context_summarize_after_turns", 0)),
+        summarize_after_turns=int(cfg.data.get("context_summarize_after_turns", 3)),
         providers=providers,
+        summarizer=summarizer,
+        summary_trigger_tokens=(
+            summary_trigger_tokens
+            if summary_trigger_tokens is not None
+            else int(cfg.data.get("context_summary_trigger_tokens", 0))
+        ),
     )
     context.add_fragment(
         ContextFragment(
