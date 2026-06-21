@@ -40,6 +40,16 @@ DEFAULT_CONFIG = {
     "workspace_root": ".",
     "protected_paths": [".git", ".env", "secrets", "~/.ssh"],
     "allow_shell": True,
+    # Shell-режим: команда исполняется через /bin/sh -c, поэтому операторы
+    # && ; | и конструкции 2>&1, >/dev/null работают. Чёрный список разрушительных
+    # команд (rm -rf, sudo, curl, ...) остаётся; редирект в файлы блокируется
+    # отдельно в policy.shell_allowed, чтобы не обходить apply_patch/write_file.
+    # False возвращает старый режим без интерпретатора: операторы становятся
+    # литералами и запрещаются (поведение ранних версий harness).
+    "allow_shell_interpreter": True,
+    # Верхний предел одновременно висящих процессов run_shell_background.
+    # Защищает от утечки фоновых процессов в длинной сессии.
+    "max_background_processes": 4,
     "supports_image_input": False,
     "max_image_bytes": 5000000,
     "image_detail": "auto",

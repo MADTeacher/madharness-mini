@@ -20,6 +20,9 @@ class ConfigCliTests(HarnessTestCase):
         self.assertNotIn("provider", cfg.data)
         self.assertNotIn("providers", cfg.data)
         self.assertTrue(cfg.data["allow_shell"])
+        # Shell-режим с интерпретатором — новый дефолт; фон-процессы ограничены.
+        self.assertIs(cfg.data["allow_shell_interpreter"], True)
+        self.assertEqual(cfg.data["max_background_processes"], 4)
 
     def test_config_ignores_legacy_provider_fields(self):
         tmp = tempfile.TemporaryDirectory()
@@ -84,6 +87,28 @@ class ConfigCliTests(HarnessTestCase):
         self.assertIs(cfg.data["supports_image_input"], True)
         self.assertEqual(cfg.data["max_image_bytes"], 42)
         self.assertEqual(cfg.data["image_detail"], "high")
+
+    def test_env_file_overrides_shell_settings(self):
+        # allow_shell, allow_shell_interpreter и max_background_processes
+        # читаются из .env с приведением типов (bool/int).
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        (root / ".madharness-mini").mkdir()
+        (root / ".madharness-mini" / "config.json").write_text("{}", encoding="utf-8")
+        (root / ".env").write_text(
+            "MADHARNESS_MINI_ALLOW_SHELL=false\n"
+            "MADHARNESS_MINI_ALLOW_SHELL_INTERPRETER=false\n"
+            "MADHARNESS_MINI_MAX_BACKGROUND_PROCESSES=8\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(root)
+
+        self.addCleanup(tmp.cleanup)
+        self.assertIs(cfg.data["allow_shell"], False)
+        self.assertIs(cfg.data["allow_shell_interpreter"], False)
+        self.assertEqual(cfg.data["max_background_processes"], 8)
 
     def test_env_file_overrides_orchestration_settings(self):
         tmp = tempfile.TemporaryDirectory()

@@ -132,6 +132,7 @@ class ToolTests(HarnessTestCase):
                 "apply_patch",
                 "search_code",
                 "run_shell",
+                "run_shell_background",
             ],
         )
 
@@ -248,15 +249,20 @@ class ToolTests(HarnessTestCase):
         self.assertIn("one allowed command", combined)
         self.assertIn("workspace root", combined)
         self.assertIn("60 seconds", combined)
-        self.assertIn("single command", combined)
-        self.assertIn("shell control operators", combined)
+        # По умолчанию команды идут через /bin/sh -c, операторы работают.
+        self.assertIn("/bin/sh -c", combined)
+        self.assertIn("&&", combined)
+        self.assertIn("2>&1", combined)
+        # Чёрный список разрушительных команд описан.
         self.assertIn("rm -rf", combined)
-        self.assertIn("Do not use run_shell to edit files", combined)
-        # Без shell-интерпретатора brace expansion и т.п. не работают — модель
-        # должна знать это из описания, иначе передаст фигурные скобки литералом.
-        self.assertIn("WITHOUT a shell interpreter", combined)
-        self.assertIn("brace expansion", combined)
-        self.assertIn("literal arguments", combined)
+        self.assertIn("sudo", combined)
+        # Редирект в файлы запрещён — модель должна знать, что для правки файлов
+        # есть apply_patch/write_file, а не shell-перенаправление.
+        self.assertIn("apply_patch", combined)
+        self.assertIn("write_file", combined)
+        # Подсказка про allow_shell_interpreter и фон через run_shell_background.
+        self.assertIn("allow_shell_interpreter", combined)
+        self.assertIn("run_shell_background", combined)
 
     def test_run_shell_accepts_workspace_relative_cwd(self):
         cfg = self.make_cfg()
@@ -277,8 +283,11 @@ class ToolTests(HarnessTestCase):
         self.assertIn("`command` argument of `run_shell`", prompt)
         self.assertIn("never use a command itself as a tool name", prompt)
         self.assertIn("same tool returns the same error", prompt)
-        self.assertIn("without a shell interpreter", prompt)
+        # Новый режим по умолчанию: /bin/sh -c, операторы работают; фон через
+        # run_shell_background упомянут. Brace expansion по-прежнему блокируется.
+        self.assertIn("/bin/sh -c", prompt)
         self.assertIn("Brace expansion", prompt)
+        self.assertIn("run_shell_background", prompt)
 
     def test_unknown_tool_returns_fail_observation(self):
         obs = ToolRegistry(self.make_cfg()).call("missing_tool", {})
@@ -739,3 +748,122 @@ class ToolTests(HarnessTestCase):
 
         self.assertFalse(obs["ok"])
         self.assertIn("outside workspace", obs["summary"])
+
+
+class RunShellBackgroundTests(HarnessTestCase):
+    """Lifecycle фонового shell-процесса: start/status/stop + auto-cleanup."""
+
+    def test_start_status_stop_roundtrip(self):
+        cfg = self.make_cfg()
+        registry = ToolRegistry(cfg)
+        try:
+            # Команда, которая пишет в stdout и сама завершается за <1с.
+            start = registry.call(
+                "run_shell_background",
+                {"action": "start", "command": "echo hello && sleep 1"},
+            )
+            self.assertTrue(start["ok"])
+            bg_id = start["id"]
+            self.assertIn("pid", start)
+
+            status = registry.call(
+                "run_shell_background", {"action": "status", "id": bg_id}
+            )
+            self.assertTrue(status["ok"])
+            # running True/False зависит от тайминга; важен формат ответа.
+            self.assertIn("running", status)
+
+            stop = registry.call(
+                "run_shell_background", {"action": "stop", "id": bg_id}
+            )
+            self.assertTrue(stop["ok"])
+            self.assertIn("exit_code", stop)
+        finally:
+            registry.close()
+
+    def test_status_unknown_id_fails(self):
+        registry = ToolRegistry(self.make_cfg())
+        try:
+            obs = registry.call(
+                "run_shell_background", {"action": "status", "id": "ghost"}
+            )
+            self.assertFalse(obs["ok"])
+            self.assertIn("ghost", obs["summary"])
+        finally:
+            registry.close()
+
+    def test_start_denied_by_policy(self):
+        registry = ToolRegistry(self.make_cfg())
+        try:
+            obs = registry.call(
+                "run_shell_background", {"action": "start", "command": "rm -rf /"}
+            )
+            self.assertFalse(obs["ok"])
+            self.assertIn("risky", obs["summary"])
+        finally:
+            registry.close()
+
+    def test_start_denies_redirect_into_file(self):
+        # Редирект в файл — обход apply_patch/write_file, блокируется той же
+        # политикой, что и у run_shell.
+        registry = ToolRegistry(self.make_cfg())
+        try:
+            obs = registry.call(
+                "run_shell_background",
+                {"action": "start", "command": "echo x > evil.txt"},
+            )
+            self.assertFalse(obs["ok"])
+            self.assertIn("redirect", obs["summary"])
+        finally:
+            registry.close()
+
+    def test_max_background_processes_limit(self):
+        cfg = self.make_cfg()
+        cfg.data["max_background_processes"] = 2
+        registry = ToolRegistry(cfg)
+        try:
+            self.assertTrue(
+                registry.call(
+                    "run_shell_background",
+                    {"action": "start", "command": "sleep 30"},
+                )["ok"]
+            )
+            self.assertTrue(
+                registry.call(
+                    "run_shell_background",
+                    {"action": "start", "command": "sleep 30"},
+                )["ok"]
+            )
+            # Третий превышает лимит — отказ.
+            third = registry.call(
+                "run_shell_background",
+                {"action": "start", "command": "sleep 30"},
+            )
+            self.assertFalse(third["ok"])
+            self.assertIn("limit", third["summary"])
+        finally:
+            registry.close()
+
+    def test_registry_close_stops_background_processes(self):
+        # Главный инвариант: cleanup при session_end гасит висящие процессы.
+        cfg = self.make_cfg()
+        registry = ToolRegistry(cfg)
+        start = registry.call(
+            "run_shell_background", {"action": "start", "command": "sleep 60"}
+        )
+        self.assertTrue(start["ok"])
+        pid = start["pid"]
+
+        registry.close()
+
+        import os
+        import time
+
+        time.sleep(0.3)
+        # kill -0 проверяет существование процесса без отправки сигнала.
+        alive = True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        self.assertFalse(alive)

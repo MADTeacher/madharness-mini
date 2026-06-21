@@ -128,7 +128,7 @@ def effective_tools(subagent: Subagent, requested_profile: str = "") -> tuple[st
         raise RuntimeError(f"subagent is not writable: {subagent.name}")
     tools = list(subagent.tools)
     if requested_profile == "read-only":
-        denied = {"apply_patch", "write_file", "run_shell"}
+        denied = {"apply_patch", "write_file", "run_shell", "run_shell_background"}
         tools = [name for name in tools if name not in denied]
     return tuple(tools)
 

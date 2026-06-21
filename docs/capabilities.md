@@ -38,7 +38,8 @@
 | `search_code` | Ищет буквальную подстроку в файлах проекта. |
 | `apply_patch` | Применяет точечные файловые правки. |
 | `write_file` | Полностью перезаписывает UTF-8 файл. |
-| `run_shell` | Запускает одну разрешённую команду в workspace или безопасном `cwd`. Команда выполняется без shell-интерпретатора: фигурные скобки, обратные кавычки, `$VAR` и `~` не раскрываются, аргументы передаются буквально. |
+| `run_shell` | Запускает одну разрешённую команду в workspace или безопасном `cwd`. По умолчанию исполняется через `/bin/sh -c`, поэтому операторы `&& ; \|\|` и конструкции `\|`, `2>&1`, `>/dev/null` работают. Разрушительные команды (`rm -rf`, `sudo`, `curl`, ...) и редирект в файлы блокируются политикой в любом режиме. |
+| `run_shell_background` | Запускает и управляет фоновым процессом (`action: start \| status \| stop`) — HTTP/dev-сервер, watcher и т.п. Процессы хранятся в пуле provider'а и автоматически гаснут при завершении сессии. Та же политика, что у `run_shell`; лимит `max_background_processes`. |
 | `activate_skill` | Подключает проектный навык в закреплённый контекст. |
 | `delegate_task` | Делегирует задачу Markdown-субагенту. |
 | `ask_user` | Доступен только разрешённым субагентам; завершает запуск вопросом пользователю. |
@@ -68,7 +69,8 @@
 `context_workspace_map`, `context_workspace_map_depth`,
 `context_workspace_map_max_entries`, `orchestration_mode`, `subagent_max_turns`,
 `subagent_context_max_tokens`, `workspace_root`, `protected_paths`,
-`allow_shell`, `supports_image_input`, `max_image_bytes`, `image_detail`.
+`allow_shell`, `allow_shell_interpreter`, `max_background_processes`,
+`supports_image_input`, `max_image_bytes`, `image_detail`.
 
 ## Управление контекстом
 
@@ -116,8 +118,18 @@
 
 - файловые инструменты проходят через `Policy.safe_path()`;
 - protected paths блокируются даже внутри workspace;
-- `run_shell` запрещает shell-цепочки, редиректы и явно рискованные команды;
-- `run_shell` выполняет команду без shell-интерпретатора и отклоняет метасимволы, которые раскрыл бы только bash: фигурные скобки и обратные кавычки;
+- `run_shell` и `run_shell_background` блокируют разрушительные команды
+  (`rm -rf`, `sudo`, `curl`, `wget`, `ssh`, `scp`, `chmod 777`, `mkfs`, `dd`)
+  и command substitution / brace expansion (обратные кавычки и фигурные скобки
+  вне кавычек);
+- редирект в файлы запрещён — только `/dev/null` и `/dev/std{out,err}`,
+  поэтому shell не может обойти `apply_patch`/`write_file` и `safe_path`;
+- по умолчанию команда исполняется через `/bin/sh -c` (`allow_shell_interpreter`):
+  операторы `&& ; ||`, `|` и `2>&1` работают; `allow_shell_interpreter=false`
+  возвращает прежний режим без интерпретатора, где control-операторы запрещены;
+- `run_shell_background` держит процессы в пуле provider'а и гасит их при
+  завершении сессии через `ToolRegistry.close()`; число одновременных фоновых
+  процессов ограничено `max_background_processes`;
 - MCP и hooks запускаются без shell-строки;
 - секреты модели не передаются MCP и hooks автоматически;
 - payload для hooks обрезается и проходит redaction;

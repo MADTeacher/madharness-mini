@@ -8,6 +8,7 @@ from ..policy import Policy
 from ..utils import fail
 from .builtins import BuiltinToolProvider
 from .context import ToolContext, normalize_writable_suffixes
+from .shell_background import ShellBackgroundProvider
 from .specs import ToolProvider
 
 
@@ -40,7 +41,15 @@ class ToolRegistry:
             normalize_writable_suffixes(writable_suffixes),
             write_scope_description,
         )
-        self.providers = [BuiltinToolProvider(), *list(providers or [])]
+        # BuiltinToolProvider отдаёт статический набор specs без состояния.
+        # ShellBackgroundProvider держит пул фоновых процессов — нужен отдельный
+        # инстанс на каждый registry, чтобы процессы одной сессии не утекали в
+        # другую. Его close() гасит процессы при registry.close() в finally run.
+        self.providers = [
+            BuiltinToolProvider(),
+            ShellBackgroundProvider(),
+            *list(providers or []),
+        ]
         self.allowed_tools = set(allowed_tools) if allowed_tools is not None else None
         self.tools = {}
         try:

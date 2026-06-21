@@ -91,6 +91,20 @@ class Config:
             key = f"MADHARNESS_MINI_{field.upper()}"
             if env.get(key):
                 self.data[field] = env[key]
+        if env.get("MADHARNESS_MINI_ALLOW_SHELL"):
+            self.data["allow_shell"] = parse_bool_env(
+                "MADHARNESS_MINI_ALLOW_SHELL", env["MADHARNESS_MINI_ALLOW_SHELL"]
+            )
+        if env.get("MADHARNESS_MINI_ALLOW_SHELL_INTERPRETER"):
+            self.data["allow_shell_interpreter"] = parse_bool_env(
+                "MADHARNESS_MINI_ALLOW_SHELL_INTERPRETER",
+                env["MADHARNESS_MINI_ALLOW_SHELL_INTERPRETER"],
+            )
+        if env.get("MADHARNESS_MINI_MAX_BACKGROUND_PROCESSES"):
+            self.data["max_background_processes"] = parse_int_env(
+                "MADHARNESS_MINI_MAX_BACKGROUND_PROCESSES",
+                env["MADHARNESS_MINI_MAX_BACKGROUND_PROCESSES"],
+            )
         if env.get("MADHARNESS_MINI_ORCHESTRATION_MODE"):
             mode = env["MADHARNESS_MINI_ORCHESTRATION_MODE"].strip().lower()
             if mode not in ORCHESTRATION_MODE_VALUES:
