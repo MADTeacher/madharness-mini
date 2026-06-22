@@ -31,6 +31,13 @@ DEFAULT_CONFIG = {
     # (75% от context_max_tokens) держит свёртку редкой — она включается только
     # на действительно длинных run-сессиях. 0 полностью отключает LLM-вызовы.
     "context_summary_trigger_tokens": 45000,
+    # Fan-out защита контрактных чтений от возрастной эвикции. Если после чтения
+    # файла было ≥ context_contract_protection_writes правок других путей за
+    # context_contract_protection_turns ходов, чтение нельзя сворачивать в дайджест:
+    # модель использует его как спецификацию для зависимых правок (см. трассу
+    # flappy2, LeaderboardPorts.js → 8 правок в соседних путях).
+    "context_contract_protection_turns": 12,
+    "context_contract_protection_writes": 3,
     "context_workspace_map": True,
     "context_workspace_map_depth": 3,
     "context_workspace_map_max_entries": 200,

@@ -339,7 +339,74 @@ class ContextManagerTests(HarnessTestCase):
         self.assertNotIn("secret-free output", rendered)
         self.assertNotIn("x" * 100, rendered)
 
-    def test_context_packet_splits_attached_user_data_from_goal_anchor(self):
+    def test_context_packet_tool_output_unit_exposes_tool_name_and_path(self):
+        """tool_output unit несёт metadata.tool_name и metadata.path для heat-анализатора.
+
+        Без этих полей анализатор не отличает read_file от прочих tool_output и не
+        может проверить свежесть чтения перед правкой — ставит ложный cold gap.
+        """
+
+        ctx = ContextManager("task", max_tokens=20000)
+        call = tool_call("call_read_meta", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "path": "server.js",
+                "summary": "read server.js",
+                "content": "code line\n" * 10,
+            },
+            file_refs=[FileRef("server.js", "read")],
+        )
+
+        ctx.messages()
+        units = ctx.report()["context_packet"]["units"]
+        tool_units = [u for u in units if u["source_type"] == "tool_output"]
+        self.assertEqual(len(tool_units), 1)
+        meta = tool_units[0]["metadata"]
+        self.assertEqual(meta["tool_name"], "read_file")
+        self.assertEqual(meta["path"], "server.js")
+
+    def test_context_packet_tool_output_keeps_tool_name_and_path_after_digest(self):
+        """Свёрнутое age-based эвикцией чтение сохраняет tool_name и path в packet.
+
+        digest_read_file роняет только текст, оставляя tool/path — это позволяет
+        heat-анализатору даже после summarization отличать чтения и понимать, что
+        они были свёрнуты, а не «модель не читала файл вовсе».
+        """
+
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_read = tool_call("c_read_dig", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_read]})
+        ctx.record_tool_result(
+            old_read,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "path": "contract.js",
+                "summary": "read contract.js:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("contract.js", "read")],
+        )
+        # Выталкиваем чтение за защитное окно — оно сворачивается в дайджест.
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        self.assertIn("_context_digested", rendered)
+        units = ctx.report()["context_packet"]["units"]
+        tool_units = [u for u in units if u["source_type"] == "tool_output"]
+        self.assertEqual(len(tool_units), 1)
+        meta = tool_units[0]["metadata"]
+        self.assertEqual(meta["tool_name"], "read_file")
+        self.assertEqual(meta["path"], "contract.js")
+
+
         task = (
             "Implement the task.\n\n"
             "```text\n"
@@ -649,6 +716,147 @@ class ContextManagerTests(HarnessTestCase):
         self.assertIn("_context_digested", rendered)
         self.assertNotIn("code line", rendered)
         self.assertEqual(len(summarized), 1)
+
+    def test_summarize_protects_read_when_other_files_edited_in_window(self):
+        """Чтение контракта защищено от эвикции при fan-out правок других путей.
+
+        Сценарий трассы flappy2: читают LeaderboardPorts.js (контракт), затем правят
+        8 зависимых файлов. Age-based эвикция сворачивала контракт в дайджест —
+        модель теряла источник правды и получала 22 ложных cold gap «summarization
+        свернул». Fan-out защита удерживает чтение, пока правок других путей в окне
+        ≥ порога (по умолчанию 3 за 12 ходов).
+        """
+
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_read = tool_call("c_contract", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_read]})
+        ctx.record_tool_result(
+            old_read,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "path": "contract.js",
+                "summary": "read contract.js:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("contract.js", "read")],
+        )
+        # Fan-out: три правки разных путей за 5 ходов — достигнут порог защиты.
+        for n in range(3):
+            w = tool_call(f"c_write_{n}", "write_file")
+            ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [w]})
+            ctx.record_tool_result(
+                w,
+                {"ok": True, "tool": "write_file", "summary": f"wrote dep_{n}.js"},
+                file_refs=[FileRef(f"dep_{n}.js", "write")],
+            )
+        # Два свежих хода выталкивают чтение за окно keep_recent + summarize_after,
+        # но не за окно fan-out (контракт ещё активен).
+        for n in range(2):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # Чтение контракта НЕ свёрнуто: fan-out защита сработала.
+        self.assertNotIn("_context_digested", rendered)
+        self.assertIn("code line", rendered)
+        self.assertEqual(summarized, [])
+
+    def test_summarize_digests_read_when_fanout_below_threshold(self):
+        """Чтение сворачивается, если правок других путей меньше порога fan-out.
+
+        Две правки (< 3) — контракт не считается активным, эвикция работает как
+        прежде. Защита от ложного срабатывания: не любой read после правки держится.
+        """
+
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_read = tool_call("c_read_below", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_read]})
+        ctx.record_tool_result(
+            old_read,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "path": "contract.js",
+                "summary": "read contract.js:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("contract.js", "read")],
+        )
+        # Только 2 правки разных путей — порог 3 не достигнут.
+        for n in range(2):
+            w = tool_call(f"c_write_below_{n}", "write_file")
+            ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [w]})
+            ctx.record_tool_result(
+                w,
+                {"ok": True, "tool": "write_file", "summary": f"wrote dep_{n}.js"},
+                file_refs=[FileRef(f"dep_{n}.js", "write")],
+            )
+        for n in range(2):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # Порог fan-out не достигнут — чтение сворачивается в дайджест как обычно.
+        self.assertIn("_context_digested", rendered)
+        self.assertNotIn("code line", rendered)
+        self.assertEqual(len(summarized), 1)
+
+    def test_summarize_digests_read_when_fanout_outside_window(self):
+        """Чтение сворачивается, если правки других путей вышли за окно K.
+
+        Fan-out защита активна только в окне contract_protection_turns (по умолчанию
+        12). Если правки случились позже окна, контракт уже не считается активным.
+        """
+
+        ctx = ContextManager(
+            "task",
+            max_tokens=20000,
+            summarize_after_turns=1,
+            contract_protection_turns=4,
+            contract_protection_writes=2,
+        )
+        old_read = tool_call("c_read_window", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_read]})
+        ctx.record_tool_result(
+            old_read,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "path": "contract.js",
+                "summary": "read contract.js:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("contract.js", "read")],
+        )
+        # 6 filler-ходов без правок — окно K=4 закрылось раньше, чем начнётся fan-out.
+        for n in range(6):
+            ctx.record_assistant({"role": "assistant", "content": f"filler {n}"})
+        # Теперь правки других путей — но они уже за пределами окна fan-out.
+        for n in range(3):
+            w = tool_call(f"c_write_late_{n}", "write_file")
+            ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [w]})
+            ctx.record_tool_result(
+                w,
+                {"ok": True, "tool": "write_file", "summary": f"wrote dep_{n}.js"},
+                file_refs=[FileRef(f"dep_{n}.js", "write")],
+            )
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        summarized = ctx.report()["history"]["summarized_old_entries"]
+
+        # Окно закрылось до правок — чтение сворачивается как обычно.
+        self.assertIn("_context_digested", rendered)
+        self.assertNotIn("code line", rendered)
+        self.assertGreaterEqual(len(summarized), 1)
 
     def test_summarize_digests_old_write_file_args(self):
         """Старые аргументы write_file сворачиваются в указатель, тело кода роняется.

@@ -38,6 +38,14 @@ def base_context(
         keep_recent_turns=int(cfg.data.get("context_keep_recent_turns", 3)),
         summarize_after_turns=int(cfg.data.get("context_summarize_after_turns", 3)),
         providers=providers,
+        # Fan-out защита: чтение контракта не сворачивается, если за ним последовало
+        # достаточно правок зависимых файлов в заданном окне ходов.
+        contract_protection_turns=int(
+            cfg.data.get("context_contract_protection_turns", 12)
+        ),
+        contract_protection_writes=int(
+            cfg.data.get("context_contract_protection_writes", 3)
+        ),
         summarizer=summarizer,
         summary_trigger_tokens=(
             summary_trigger_tokens

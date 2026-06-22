@@ -98,6 +98,8 @@ class ContextManager:
         providers: Iterable[ContextProvider] | None = None,
         summarizer: ReasoningSummarizer | None = None,
         summary_trigger_tokens: int = 0,
+        contract_protection_turns: int = 12,
+        contract_protection_writes: int = 3,
     ):
         self.user_task = user_task
         self.max_tokens = max(int(max_tokens), 0)
@@ -106,6 +108,12 @@ class ContextManager:
         # усекается, а его tool-наблюдения сворачиваются. 0 — выкл (поведение по
         # умолчанию), чтобы не менять существующие прогоны учебного харнесса.
         self.summarize_after_turns = max(int(summarize_after_turns), 0)
+        # Fan-out защита контрактных чтений от эвикции: если после read_file за
+        # contract_protection_turns ходов последовало ≥ contract_protection_writes
+        # правок других путей, чтение сворачивать нельзя — модель использует его
+        # как спецификацию для зависимых правок (cold gap из трассы flappy2).
+        self.contract_protection_turns = max(int(contract_protection_turns), 0)
+        self.contract_protection_writes = max(int(contract_protection_writes), 0)
         self.providers = list(providers or [])
         # Внешний суммаризатор рассуждений (DIP): менеджер его не создаёт, а
         # получает извне. Триггер по токеновому порогу истории; 0 — выключено,
@@ -121,6 +129,11 @@ class ContextManager:
         # Реестр файлового состояния: путь -> последняя read/write правка.
         # Кормит напоминание о «грязных» файлах (гипотеза C) и не пишется в trace.
         self._file_state: dict[str, _FileState] = {}
+        # История правок по ходам: turn -> множество правленных путей. Нужна для
+        # fan-out защиты _is_protected_read (сколько разных путей правилось после
+        # чтения). _file_state хранит только максимум, поэтому трассу правок ведём
+        # отдельно. Не пишется в trace — производный индекс.
+        self._writes_by_turn: dict[int, set[str]] = {}
         # Скелет свёрнутых/выброшенных ходов: original_index -> компактная строка.
         # Ключ по индексу делает накопление идемпотентным при повторных messages().
         self._dropped_summary: dict[int, str] = {}
@@ -188,6 +201,10 @@ class ContextManager:
             turn = len(self._history) - 1
             for ref in refs:
                 self._update_file_state(ref, turn)
+                # Копим правки других путей по ходам — для fan-out защиты
+                # _is_protected_read. read сюда не кладём: нужны только write/patch.
+                if ref.kind in ("write", "patch"):
+                    self._writes_by_turn.setdefault(turn, set()).add(ref.path)
             entry.file_refs = refs
         self._last_stats = None
         self._last_report = None
@@ -479,20 +496,43 @@ class ContextManager:
     def _is_protected_read(self, path: str | None, read_turn: int) -> bool:
         """Защищено ли read_file-наблюдение от любой эвикции контекста.
 
-        Путь защищён, если по нему была правка (write/patch) в этом же ходе или
-        позже. Без такой защиты эвикция заменяет чтение дайджестом или роняет
-        его целиком, модель генерирует патч по устаревшему воспоминанию, а
-        harness применяет его к актуальному файлу — цикл неудачных apply_patch
-        (см. apply_patch_storm). Единый предикат переиспользуется в возрастной
-        компактизации, дедупе tool-наблюдений и дропе истории по бюджету.
+        Два случая защиты:
+
+        1. Тот же путь правился в этом же ходе или позже. Без такой защиты
+        эвикция заменяет чтение дайджестом или роняет его целиком, модель
+        генерирует патч по устаревшему воспоминанию, а harness применяет его к
+        актуальному файлу — цикл неудачных apply_patch (см. apply_patch_storm).
+
+        2. Fan-out контрактного чтения: после чтения этого пути было
+        ≥ contract_protection_writes правок других путей за contract_protection_turns
+        ходов. Модель читает спецификацию (контракт, интерфейс, ТЗ) и потом правит
+        много зависимых файлов — сворачивание чтения оставляет её без актуального
+        источника правды (cold gap из трассы flappy2: LeaderboardPorts.js → 8 правок
+        соседних файлов). Защищаем только чтение, пока fan-out активен; если правки
+        закончились раньше порога или вышли за окно — чтение сворачивается как обычно.
+
+        Единый предикат переиспользуется в возрастной компактизации, дедупе
+        tool-наблюдений и дропе истории по бюджету.
         """
 
         if not path:
             return False
         state = self._file_state.get(path)
-        if state is None or state.last_write_turn is None:
+        if state is not None and state.last_write_turn is not None:
+            if state.last_write_turn >= read_turn:
+                return True
+        # Fan-out: считаем различные пути (кроме читаемого), правленные после
+        # чтения в пределах окна. O(K) по числу ходов в окне — пренебрежимо для
+        # учебного харнесса (≤300 ходов, окно по умолчанию 12).
+        if self.contract_protection_writes <= 0 or self.contract_protection_turns <= 0:
             return False
-        return state.last_write_turn >= read_turn
+        window_end = min(read_turn + 1 + self.contract_protection_turns, len(self._history))
+        distinct_other: set[str] = set()
+        for turn in range(read_turn + 1, window_end):
+            for written_path in self._writes_by_turn.get(turn, ()):
+                if written_path != path:
+                    distinct_other.add(written_path)
+        return len(distinct_other) >= self.contract_protection_writes
 
     def _entry_has_protected_read(self, entry: HistoryEntry, read_turn: int) -> bool:
         """Содержит ли ход защищённое read_file-наблюдение (для дропа по бюджету).
@@ -929,6 +969,25 @@ def _tool_kind_and_path(content: str) -> tuple[str, str | None]:
     return tool_name, path_value
 
 
+def _tool_observation_meta(content: str) -> dict[str, str]:
+    """Метаданные tool-наблюдения для context_packet: имя инструмента и путь.
+
+    Heat-анализатор читает metadata.tool_name и metadata.path, чтобы отличать
+    read_file от прочих tool_output и сверять свежесть чтения перед правкой.
+    Без этих полей все tool-наблюдения выглядят безымянными — анализатор ставит
+    ложный cold gap. Безопасный пустой возврат, если JSON не разобрался или полей
+    нет: метаданные просто не дополняются, поведение остаётся прежним.
+    """
+
+    tool_name, path_value = _tool_kind_and_path(content)
+    meta: dict[str, str] = {}
+    if tool_name:
+        meta["tool_name"] = tool_name
+    if path_value:
+        meta["path"] = path_value
+    return meta
+
+
 def _context_packet_report(
     user_task: str,
     fragments: list[ContextFragment],
@@ -969,6 +1028,24 @@ def _context_packet_report(
         for message_index, message in enumerate(entry.rendered_messages()):
             source_type = _message_source_type(message)
             role = str(message.get("role") or "")
+            metadata = {
+                "history_index": original_index,
+                "history_kind": entry.kind,
+                "role": role,
+                "tool_call_id": str(message.get("tool_call_id") or ""),
+                "tool_call_ids": sorted(
+                    entry.expected_tool_call_ids | entry.seen_tool_call_ids
+                ),
+            }
+            # Для tool-наблюдений поднимаем имя инструмента и путь из JSON-контента:
+            # иначе heat-анализатор видит все чтения/выводы как безымянный
+            # "tool_output" и не может отличить read_file, чтобы проверить свежесть
+            # чтения перед правкой (ложный cold gap). Поля работают и после
+            # возрастной эвикции — digest_read_file сохраняет tool и path.
+            if role == "tool":
+                content = message.get("content")
+                if isinstance(content, str):
+                    metadata.update(_tool_observation_meta(content))
             cursor = _append_context_unit(
                 units,
                 cursor,
@@ -978,15 +1055,7 @@ def _context_packet_report(
                 source_ref=f"history[{original_index}].messages[{message_index}]",
                 payload=message,
                 included_because="rendered_history",
-                metadata={
-                    "history_index": original_index,
-                    "history_kind": entry.kind,
-                    "role": role,
-                    "tool_call_id": str(message.get("tool_call_id") or ""),
-                    "tool_call_ids": sorted(
-                        entry.expected_tool_call_ids | entry.seen_tool_call_ids
-                    ),
-                },
+                metadata=metadata,
                 classification=_classification_for_source_type(source_type),
                 confidence=0.9,
             )
