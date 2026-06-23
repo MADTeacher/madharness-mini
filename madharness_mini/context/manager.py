@@ -25,6 +25,7 @@ from .fragments import ContextFragment, ContextProvider, ContextState
 from .history import FileRef, HistoryEntry
 from .render import render_messages
 from .summary import ReasoningSummarizer
+from ..utils import paths_from_patch
 
 # Полный assistant-текст полезен только до разумного предела: модель уже
 # получила свои рассуждения в прошлом ходе, а следующий запрос платит за них снова.
@@ -57,6 +58,12 @@ ATTACHED_HEADING_RE = re.compile(
 # Идентификатор transient-фрагмента с напоминанием о «грязных» файлах.
 FILE_STATE_REMINDER_ID = "file-state:reminder"
 
+# Сколько путей показываем в каждой категории file-state-reminder'а. Напоминание
+# живёт в transient-фрагменте evictability=normal: без лимита оно разрастается в
+# длинных сессиях с массовой эвикцией и само себя убивает через emergency-drop.
+# Ограничиваем так же, как COMPACTED_HISTORY_MAX_FILES.
+FILE_STATE_REMINDER_MAX_FILES = 15
+
 # Идентификатор транзиентного фрагмента-скелета свёрнутой/выброшенной истории.
 COMPACTED_HISTORY_ID = "history:compacted"
 # Скелет не должен расти безгранично: показываем последние ходы и общий лимит.
@@ -81,12 +88,20 @@ class _FileState:
     """Запись о последнем чтении и правке одного пути.
 
     Хранит номера ходов последнего read и write/patch. Файл считается «грязным»,
-    если правка случилась позже чтения (или файл не перечитывали вовсе). turn —
+    если правка случалась позже чтения (или файл не перечитывали вовсе). turn —
     это индекс элемента истории, который оставил событие.
+
+    last_*_collapsed_turn помечает ход, на котором текст последнего read/write
+    покинул промпт в результате эвикции (digest-fold в dedup/summarize или
+    удаление хода целиком в summary-fold/drop). None = авторитетное событие
+    этого типа всё ещё видимо модели полным содержимым. Кормит предикат
+    _model_knows_current_state и третью категорию file-state-reminder'а.
     """
 
     last_read_turn: int | None = None
     last_write_turn: int | None = None
+    last_read_collapsed_turn: int | None = None
+    last_write_collapsed_turn: int | None = None
 
 
 class ContextManager:
@@ -282,8 +297,18 @@ class ContextManager:
         # Дедуп сворачивает избыточные tool-наблюдения (read_file, дублирующий
         # постоянный фрагмент; повторы внутри истории) до оценки бюджета.
         deduped_tool_messages = dedup_tool_messages(
-            entries, fragments, is_protected_read=self._is_protected_read
+            entries,
+            fragments,
+            is_protected_read=self._is_protected_read,
+            entry_indexes=entry_indexes,
         )
+        # read_file, свёрнутые дедупом в дайджест-указатель, теряют полный текст:
+        # фиксируем потерю видимости для последующего предиката _model_knows_current_state
+        # и reminder'а. Инвариант в _mark_read_collapsed отсечёт свёрнутые
+        # исторические чтения при свежем чтении того же пути в окне.
+        for folded in deduped_tool_messages:
+            if folded.get("is_read_fold") and folded.get("path"):
+                self._mark_read_collapsed(folded["path"], folded["original_index"])
         summarized_old_entries = self._summarize_old_entries(entries, entry_indexes)
         # LLM-свёртка по токеновому порогу: обновляет накопительную сводку, а
         # _apply_summary_fold убирает уже свёрнутые ходы из рендера.
@@ -447,6 +472,11 @@ class ContextManager:
         read обновляет last_read_turn, write/patch — last_write_turn. Берём
         максимум по turn, чтобы несколько событий по одному файлу в одном ходе
         не затирали друг друга и сохраняли самую свежую правку.
+
+        Новое событие восстанавливает видимость: обнуляем соответствующее
+        collapsed-поле — актуальный текст снова в промпте, прежняя эвикция уже
+        неактуальна. Второе collapsed-поле не трогаем: оно относится к другому
+        типу события и могло сработать по старому ходу.
         """
 
         state = self._file_state.setdefault(ref.path, _FileState())
@@ -454,12 +484,68 @@ class ContextManager:
             state.last_read_turn = (
                 turn if state.last_read_turn is None else max(state.last_read_turn, turn)
             )
+            state.last_read_collapsed_turn = None
         else:  # write или patch
             state.last_write_turn = (
                 turn
                 if state.last_write_turn is None
                 else max(state.last_write_turn, turn)
             )
+            state.last_write_collapsed_turn = None
+
+    def _mark_read_collapsed(self, path: str, entry_index: int) -> None:
+        """Фиксируем, что текст последнего чтения пути покинул промпт.
+
+        Помечаем только если свёрнутый/удалённый ход совпадает с last_read_turn:
+        если в окне есть более свежее чтение того же пути, модель не слепая и
+        помечать нельзя. Сравнение строгим равенством (а не «<=») принципиально:
+        свернуть можно лишь авторитетное событие, историческое трогать не нужно.
+        """
+
+        state = self._file_state.get(path)
+        if state is None or state.last_read_turn != entry_index:
+            return
+        state.last_read_collapsed_turn = entry_index
+
+    def _mark_write_collapsed(self, path: str, entry_index: int) -> None:
+        """Фиксируем, что текст последней правки пути покинул промпт.
+
+        Симметрично _mark_read_collapsed, но для write/patch. Помечаем только при
+        совпадении свёрнутого хода с last_write_turn.
+        """
+
+        state = self._file_state.get(path)
+        if state is None or state.last_write_turn != entry_index:
+            return
+        state.last_write_collapsed_turn = entry_index
+
+    def _model_knows_current_state(self, path: str) -> bool:
+        """Знает ли модель текущее состояние файла.
+
+        Авторитет — последнее по времени событие (read или write). Знание есть,
+        если авторитетное событие всё ещё видно в промпте полным содержимым:
+        observation для read, args для write/patch. Более старые события не
+        помогают — они показывают состояние до авторитетного.
+
+        Tie-break при равенстве ходов за write: в одном ходе write новее read и
+        отражает post-write состояние, а read показывал pre-write (уже устарел).
+
+        clip_tool_messages намеренно не учитывается: частичная видимость лучше
+        ничего, и свернуть полный текст до excerpt'а — не та же потеря, что
+        digest или удаление хода. Это сознательное MVP-ограничение, документируется
+        тестом clipped-чтение → «знает».
+        """
+
+        state = self._file_state.get(path)
+        if state is None:
+            return False
+        last_read = state.last_read_turn if state.last_read_turn is not None else -1
+        last_write = state.last_write_turn if state.last_write_turn is not None else -1
+        if last_read < 0 and last_write < 0:
+            return False
+        if last_read > last_write:
+            return state.last_read_collapsed_turn is None
+        return state.last_write_collapsed_turn is None
 
     def _dirty_files(self) -> list[tuple[str, int]]:
         """Пути, изменённые после последнего чтения (или не прочитанные вовсе).
@@ -499,6 +585,40 @@ class ContextManager:
         never_read.sort(key=lambda item: item[1], reverse=True)
         stale_after_write.sort(key=lambda item: item[1], reverse=True)
         return never_read, stale_after_write
+
+    def _collapsed_authority_files(self) -> list[tuple[str, int, str]]:
+        """Пути, по которым модель работала, но потеряла видимость.
+
+        Возвращаем тройки (путь, turn авторитетного события, тип события), где
+        авторитетное событие свернулось (digest-fold) или удалилось вместе с
+        ходом. Фильтруем через _model_knows_current_state == False и требуем,
+        чтобы по пути было хотя бы одно событие: путь, которого не касались, сюда
+        не относится (его и напоминать незачем). Сортируем по убыванию turn
+        авторитетного события.
+
+        Тип события ('read' | 'write') нужен формулировке reminder'а: модель
+        должна понять, что именно она потеряла — чтение файла или свою правку.
+        """
+
+        collapsed: list[tuple[str, int, str]] = []
+        for path, state in self._file_state.items():
+            if self._model_knows_current_state(path):
+                continue
+            last_read = state.last_read_turn
+            last_write = state.last_write_turn
+            # Путь без событий не относится к этой категории — для него нет
+            # «потерянной» видимости, его提醒ает never_read, если он правлен.
+            if last_read is None and last_write is None:
+                continue
+            # Авторитет — последнее событие (tie-break за write, как в предикате).
+            if last_read is not None and (
+                last_write is None or last_read > last_write
+            ):
+                collapsed.append((path, last_read, "read"))
+            elif last_write is not None:
+                collapsed.append((path, last_write, "write"))
+        collapsed.sort(key=lambda item: item[1], reverse=True)
+        return collapsed
 
     def _entry_skeleton(self, entry: HistoryEntry) -> str:
         """Компактный «скелет» одного хода для свёрнутой истории.
@@ -685,15 +805,36 @@ class ContextManager:
         )
 
     def _file_state_reminder(self) -> ContextFragment | None:
-        """Собираем transient-напоминание о файлах, которые правились без read.
+        """Собираем transient-напоминание о файлах, требующих перечитывания.
 
-        Различаем две категории: устаревшие после правки (читали раньше правки) и
-        ни разу не прочитанные (правка без единого чтения). Для вторых указываем
-        явно вызвать read_file перед правкой — иначе модель правит вслепую.
+        Три категории, ортогональные по причине слепоты:
+
+        1. never_read — файл записан без единого чтения. Модель никогда не видела
+           содержимое, правит вслепую. Жёстко просим read_file перед правкой.
+        2. stale_after_write — читали раньше правки и не перечитали. Модель видела
+           pre-write состояние, но файл уже изменён.
+        3. collapsed_authority — модель видела актуальное состояние (чтение или
+           свою правку), но harness свернул это наблюдение в digest-указатель или
+           выкинул ход. Это новая категория visibility-трекинга: без неё модель
+           продолжает действовать по «вытесненной» памяти, не зная, что harness её
+           ослепил. Пути из первых двух категорий сюда не дублируем.
         """
 
         never_read, stale_after_write = self._dirty_files_by_category()
-        if not never_read and not stale_after_write:
+        # Каждую категорию ограничиваем FILE_STATE_REMINDER_MAX_FILES: напоминание
+        # живёт в transient-фрагменте evictability=normal, и без лимита массовая
+        # эвикция разрастает его так, что emergency-drop убирает сам фрагмент.
+        never_read = never_read[:FILE_STATE_REMINDER_MAX_FILES]
+        stale_after_write = stale_after_write[:FILE_STATE_REMINDER_MAX_FILES]
+        dirty_paths = {path for path, _ in never_read} | {
+            path for path, _ in stale_after_write
+        }
+        collapsed = [
+            item
+            for item in self._collapsed_authority_files()
+            if item[0] not in dirty_paths
+        ][:FILE_STATE_REMINDER_MAX_FILES]
+        if not never_read and not stale_after_write and not collapsed:
             return None
         lines = ["# Напоминание о файловом состоянии"]
         if stale_after_write:
@@ -715,6 +856,20 @@ class ContextManager:
                     f"- {path} (записан на ходу {turn}, ни разу не прочитан — "
                     "вызовите read_file перед правкой)"
                 )
+        if collapsed:
+            # Компактный inline-формат: collapsed-категория активна именно в
+            # длинных сессиях с массовой эвикцией, где бюджет уже под давлением.
+            # Многословное описание каждого файла раздуло бы transient-фрагмент
+            # так, что emergency-drop убрал бы его (и соседние) целиком. Поэтому
+            # только пути через запятую — модель видит, какие файлы нужно
+            # перечитать, без перегрузки бюджета.
+            lines.append(
+                "Эти файлы вы ранее читали или правили, но harness свернул "
+                "соответствующее наблюдение — состояние больше не в контексте. "
+                "Перед правкой вызовите read_file:"
+            )
+            paths_text = ", ".join(path for path, _turn, _kind in collapsed)
+            lines.append(f"- {paths_text}")
         return ContextFragment(
             id=FILE_STATE_REMINDER_ID,
             source="madharness-mini file-state reminder",
@@ -797,7 +952,13 @@ class ContextManager:
                     # файла переотправляется каждый ход и доминирует в стоимости
                     # старых assistant-ходов. Полный текст лежит на диске —
                     # дайджест подсказывает перечитать его при необходимости.
-                    if _digest_old_write_tool_calls(message):
+                    digested_paths = _digest_old_write_tool_calls(message)
+                    if digested_paths:
+                        # Текст последней правки каждого свёрнутого пути покинул
+                        # промпт: фиксируем потерю write-видимости. Инвариант в
+                        # хелпере отсечёт «историческую» правку при более свежей.
+                        for path in digested_paths:
+                            self._mark_write_collapsed(path, original_index)
                         changed = True
                 elif role == "tool" and isinstance(content, str):
                     if len(content) <= SUMMARY_TOOL_LIMIT:
@@ -816,6 +977,12 @@ class ContextManager:
                         # Оставляем полное наблюдение, оплачивая это токенами.
                         if not self._is_protected_read(path, original_index):
                             message["content"] = digest_read_file(content, path)
+                            # Текст последнего чтения пути свернулся в указатель:
+                            # фиксируем потерю видимости. Инвариант в хелпере
+                            # отсечёт свёрнутое «историческое» чтение, если в окне
+                            # есть более свежее чтение того же пути.
+                            if path:
+                                self._mark_read_collapsed(path, original_index)
                             changed = True
                     else:
                         message["content"] = clip_tool_content(content, SUMMARY_TOOL_LIMIT)
@@ -879,16 +1046,29 @@ class ContextManager:
         Ход исключается, если его original_index < _summarized_upto. Защищённые
         чтения сохраняем, даже если попали в этот диапазон: их актуальное
         содержимое нельзя терять (FL1).
+
+        Для удаляемых ходов фиксируем потерю видимости их read/write событий:
+        текст покинул промпт целиком, модель теряет знание о файле. Защищённые
+        чтения остаются в рендере, поэтому их не помечаем.
         """
 
         if self._summarized_upto <= 0:
             return
-        kept = [
-            (entry, index)
-            for entry, index in zip(entries, entry_indexes)
-            if index >= self._summarized_upto
-            or self._entry_has_protected_read(entry, index)
-        ]
+        kept: list[tuple[HistoryEntry, int]] = []
+        for entry, index in zip(entries, entry_indexes):
+            if index >= self._summarized_upto or self._entry_has_protected_read(
+                entry, index
+            ):
+                kept.append((entry, index))
+                continue
+            # Ход уходит из рендера: его read/write файловые эффекты больше не
+            # видны модели. Помечаем только пути, чьё авторитетное событие лежит
+            # в этом ходе — инвариант в хелперах отсечёт «исторические» события.
+            for ref in entry.file_refs:
+                if ref.kind == "read":
+                    self._mark_read_collapsed(ref.path, index)
+                elif ref.kind in ("write", "patch"):
+                    self._mark_write_collapsed(ref.path, index)
         entries[:] = [entry for entry, _ in kept]
         entry_indexes[:] = [index for _, index in kept]
 
@@ -1063,6 +1243,16 @@ class ContextManager:
             self._dropped_summary[entry_indexes[removable]] = self._entry_skeleton(
                 entries[removable]
             )
+            # Ход выбывает из рендера целиком: фиксируем потерю видимости его
+            # read/write-событий. В forced-режиме сюда попадает и protected-read,
+            # которого _entry_has_protected_read уже не защитил — модель
+            # гарантированно слепая, и помечать обязательно. Инвариант в хелперах
+            # отсечёт «исторические» события при более свежем в окне.
+            for ref in entries[removable].file_refs:
+                if ref.kind == "read":
+                    self._mark_read_collapsed(ref.path, entry_indexes[removable])
+                elif ref.kind in ("write", "patch"):
+                    self._mark_write_collapsed(ref.path, entry_indexes[removable])
             del entries[removable]
             del entry_indexes[removable]
             protected_start = max(len(entries) - keep_recent, 0)
@@ -1070,16 +1260,20 @@ class ContextManager:
         return dropped
 
 
-def _digest_old_write_tool_calls(message: dict[str, Any]) -> bool:
+def _digest_old_write_tool_calls(message: dict[str, Any]) -> set[str]:
     """Сворачиваем аргументы write_file/apply_patch у старого assistant-хода.
 
     Заменяем тело файла (content/patch) дайджестом-указателем, оставляя валидный
-    JSON: иначе провайдер отвергнет следующий запрос. Возвращаем True, если хотя
-    бы один аргумент действительно свернулся — это помечает ход как изменённый
-    для отчёта возрастной свёртки.
+    JSON: иначе провайдер отвергнет следующий запрос. Возвращаем множество путей,
+    чьи write/patch-args действительно свернулись (длиннее SUMMARY_TOOLCALL_LIMIT),
+    чтобы上层 _summarize_old_entries пометил их write-collapsed: текст последней
+    правки пути покинул промпт, модель может действовать вслепую по нему.
+
+    Пустое множество = ход не изменён (прежний bool(False)). Это сохраняет
+    прежнюю семантику «changed» в вызывающей стороне через bool(digested_paths).
     """
 
-    changed = False
+    digested_paths: set[str] = set()
     for call in message.get("tool_calls") or []:
         if not isinstance(call, dict):
             continue
@@ -1092,11 +1286,38 @@ def _digest_old_write_tool_calls(message: dict[str, Any]) -> bool:
             continue
         if not isinstance(arguments, str) or len(arguments) <= SUMMARY_TOOLCALL_LIMIT:
             continue
+        # Достаём пути до замены arguments на digest — из исходных args надёжнее,
+        # чем из digest-вывода (хотя digest_write_args тоже сохраняет path/paths).
+        paths = _paths_from_write_args(name, arguments)
         digested = digest_write_args(arguments, name)
         if digested != arguments:
             function["arguments"] = digested
-            changed = True
-    return changed
+            digested_paths.update(paths)
+    return digested_paths
+
+
+def _paths_from_write_args(name: str, arguments: str) -> list[str]:
+    """Пути, затронутые write_file/apply_patch tool_call, из JSON-arguments.
+
+    write_file — один путь под ключом path; apply_patch — мультфильмный, пути
+    достаём общим парсером patch-формата. Любая ошибка разбора возвращает пустой
+    список: лучше потерять collapsed-пометку, чем уронить свёртку ходов.
+    """
+
+    try:
+        payload = json.loads(arguments)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    if name == "write_file":
+        path = payload.get("path")
+        return [str(path)] if isinstance(path, str) and path else []
+    if name == "apply_patch":
+        patch = payload.get("patch")
+        if isinstance(patch, str):
+            return paths_from_patch(patch)
+    return []
 
 
 def _sanitize_assistant_message(message: dict[str, Any]) -> dict[str, Any]:

@@ -103,6 +103,8 @@ def dedup_tool_messages(
     entries: list[HistoryEntry],
     fragments: list[ContextFragment],
     is_protected_read: Callable[[str, int], bool] | None = None,
+    *,
+    entry_indexes: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Сворачиваем избыточные role=tool наблюдения в краткие сводки.
 
@@ -121,8 +123,18 @@ def dedup_tool_messages(
     True для пары (path, turn) read_file-наблюдения, такое чтение не сворачивается:
     файл позже правился, и полный текст ещё нужен модели. При None поведение
     прежнее.
+
+    entry_indexes — изначальные индексы истории для каждой позиции в entries.
+    Передаётся явно, чтобы сделать контракт «позиция == индекс истории»
+    видимым: caller в messages() собирает entries как deepcopy истории, и без
+    этого параметра позиция совпадает с индексом лишь пока порядок вызовов не
+    изменится. При None подразумевается range(len(entries)) (прежнее поведение).
+    Возвращаемое поле original_index — именно то, что нужно предикату видимости:
+    по нему _mark_read_collapsed сверяется с last_read_turn.
     """
 
+    if entry_indexes is None:
+        entry_indexes = list(range(len(entries)))
     constant_sources = {
         fragment.source for fragment in fragments if not fragment.transient
     }
@@ -174,6 +186,12 @@ def dedup_tool_messages(
                     "tool_call_id": str(message.get("tool_call_id") or ""),
                     "rule": rule,
                     "turn": turn,
+                    "original_index": entry_indexes[turn],
+                    # Путь свёрнутого read_file-наблюдения и признак, что это
+                    # именно read-fold: по ним上层 messages() пинает
+                    # _mark_read_collapsed, фиксируя потерю видимости.
+                    "path": read_path,
+                    "is_read_fold": read_path is not None,
                     "before_chars": before_chars,
                     "after_chars": len(shortened),
                     "saved_chars": before_chars - len(shortened),

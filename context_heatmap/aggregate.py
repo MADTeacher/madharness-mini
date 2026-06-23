@@ -286,5 +286,6 @@ def session_report(
             "report": "report.md",
             "heatmap": "heatmap.html",
             "heatmap_png": "heatmap.png",
+            "context_window_png": "context_window.png",
         },
     }

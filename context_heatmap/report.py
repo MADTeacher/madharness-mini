@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from .io import write_csv, write_json, write_jsonl
-from .png import render_png_summary
+from .anatomy_data import build_anatomy_data
+from .heatmap import render_heatmap_png
+from .png import render_context_window_png
 from .schema import AnalysisResult
 
 
@@ -32,13 +34,26 @@ def write_analysis_outputs(result: AnalysisResult, out_dir: Path) -> None:
     )
     write_jsonl(out_dir / "warnings.jsonl", result.warnings)
     write_json(out_dir / "session_report.json", result.session_report)
-    render_png_summary(
+    event_rows = [event.to_dict() for event in result.events]
+    finding_rows = [finding.to_dict() for finding in result.findings]
+    packet_rows = [packet.to_dict() for packet in result.packets]
+    # Два PNG с разными ролями: context_window.png — структура окна (бывший
+    # heatmap.png), heatmap.png — «анатомия сессии» с вердиктом и сигналами.
+    render_context_window_png(
         result.session_report,
-        [packet.to_dict() for packet in result.packets],
+        packet_rows,
         turn_rows,
-        [finding.to_dict() for finding in result.findings],
-        out_dir / "heatmap.png",
+        finding_rows,
+        out_dir / "context_window.png",
     )
+    anatomy = build_anatomy_data(
+        result.session_report,
+        packet_rows,
+        turn_rows,
+        finding_rows,
+        event_rows,
+    )
+    render_heatmap_png(anatomy, out_dir / "heatmap.png")
     write_csv(
         out_dir / "fragment_heat.csv",
         heat_rows,

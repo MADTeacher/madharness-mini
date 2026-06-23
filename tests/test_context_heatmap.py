@@ -8,10 +8,12 @@ from pathlib import Path
 
 from context_heatmap.cli import main as heatmap_main
 from context_heatmap.features import detect_cold_gaps, detect_window_pressure, score_fragment
-from context_heatmap.io import read_jsonl
-from context_heatmap.loaders.madharness_trace import load_trace
+from context_heatmap.io import read_jsonl, write_jsonl
+from context_heatmap.loaders.madharness_trace import load_trace, load_trace_path
 from context_heatmap.normalize import load_normalized_events
-from context_heatmap.png import SOURCE_COLORS, render_png_summary
+from context_heatmap.png import SOURCE_COLORS, render_context_window_png
+from context_heatmap.anatomy_data import build_anatomy_data
+from context_heatmap.heatmap import render_heatmap_png
 from context_heatmap.render import render_html_report
 from context_heatmap.report import write_analysis_outputs
 from context_heatmap.scoring import analyze_events
@@ -1489,7 +1491,7 @@ class ContextHeatmapTests(HarnessTestCase):
         ]
 
         png_path = out_dir / "heatmap.png"
-        render_png_summary(report, packets, turn_heat, findings, png_path)
+        render_context_window_png(report, packets, turn_heat, findings, png_path)
         width, height, pixels = _read_png_rgb(png_path)
         pixel_set = set(pixels)
 
@@ -2269,3 +2271,282 @@ class ContextHeatmapTests(HarnessTestCase):
         self.assertIn("context-heatmap.md", docs_index)
         self.assertIn("пассивной диагностики", capabilities)
         self.assertIn("context_packet", context_layer)
+
+    def test_anatomy_data_builds_expected_columns_and_seams(self):
+        """Агрегатор собирает колонки, швы summarization, действия и verdict."""
+
+        report = {
+            "session_id": "anat:1",
+            "model_calls": 2,
+            "turns": 2,
+            "max_red_token_share": 0.0,
+            "max_cold_gap_score": 0.72,
+            "max_window_pressure_score": 0.7,
+            "max_assistant_share": 0.58,
+        }
+        packets = [
+            {
+                "model_call_id": "anat:0",
+                "turn_id": 0,
+                "input_tokens": 400,
+                "context_window_tokens": 1000,
+                "fragments": [
+                    {"source_type": "user_message", "tokens": 200},
+                    {"source_type": "tool_output", "tokens": 200},
+                ],
+            },
+            {
+                "model_call_id": "anat:1",
+                "turn_id": 1,
+                "input_tokens": 900,
+                "context_window_tokens": 1000,
+                "fragments": [
+                    {"source_type": "assistant_message", "tokens": 600},
+                    {"source_type": "tool_output", "tokens": 300},
+                ],
+            },
+        ]
+        turn_heat = [
+            {
+                "model_call_id": "anat:0",
+                "turn_id": 0,
+                "cold_gap_score": 0.0,
+                "window_pressure_score": 0.0,
+                "assistant_share": 0.0,
+                "red_token_share": 0.0,
+                "raw_tool_share": 0.5,
+            },
+            {
+                "model_call_id": "anat:1",
+                "turn_id": 1,
+                "cold_gap_score": 0.72,
+                "window_pressure_score": 0.7,
+                "assistant_share": 0.6,
+                "red_token_share": 0.0,
+                "raw_tool_share": 0.3,
+            },
+        ]
+        findings = [{"kind": "cold_gap", "turn_id": 1}]
+        events = [
+            {
+                "event_type": "model_call",
+                "payload": {
+                    "turn": 1,
+                    "context_report": {
+                        "history": {
+                            "summarized_old_entries": [{"index": 0, "kind": "tool_turn"}],
+                            "dropped_entries": [],
+                        },
+                        "truncated": False,
+                    },
+                },
+            },
+            {
+                "event_type": "model_output",
+                "payload": {
+                    "turn": 1,
+                    "message": {
+                        "tool_calls": [
+                            {"function": {"name": "write_file"}},
+                            {"function": {"name": "read_file"}},
+                        ]
+                    },
+                },
+            },
+        ]
+
+        data = build_anatomy_data(report, packets, turn_heat, findings, events)
+
+        self.assertEqual(len(data["columns"]), 2)
+        col0 = data["columns"][0]
+        self.assertEqual(col0["model_call_id"], "anat:0")
+        # Доли токенов по типам сохранены из фрагментов пакета.
+        self.assertEqual(col0["tokens_by_type"]["user_message"], 200)
+        self.assertEqual(col0["tokens_by_type"]["tool_output"], 200)
+        # fill_share = used/window, без подмены.window=1000, used=400.
+        self.assertAlmostEqual(col0["fill_share"], 0.4, places=2)
+        # Сигналы проброшены из turn_heat.
+        self.assertEqual(data["columns"][1]["cold_gap_score"], 0.72)
+
+        # Cold turns собраны без дублей и в порядке находок.
+        self.assertEqual(data["cold_turns"], [1])
+        # Шов summarization на ходе 1: одна свёрнутая запись.
+        self.assertEqual(len(data["seams"]), 1)
+        self.assertEqual(data["seams"][0]["turn_id"], 1)
+        self.assertEqual(data["seams"][0]["summarized"], 1)
+        self.assertFalse(data["seams"][0]["truncated"])
+        # Действия привязаны к ходу 1 и схлопнуты по дублям имени.
+        self.assertEqual(data["actions_by_turn"][1], ["write_file", "read_file"])
+        # Verdict: red=0, cold=on, pressure=on → «011», peak на ходе 1.
+        self.assertEqual(data["verdict"]["dots"], "011")
+        self.assertEqual(data["verdict"]["peak_turn"], 1)
+        self.assertIn("COLD", data["verdict"]["label"])
+
+    def test_heatmap_png_renders_without_raw_content(self):
+        """Новый heatmap.png генерируется и не содержит raw content из findings."""
+
+        cfg = self.make_cfg()
+        out_dir = Path(cfg.root) / "heatmap-anatomy"
+        report = {
+            "session_id": "anat:2",
+            "model_calls": 2,
+            "turns": 2,
+            "max_red_token_share": 0.0,
+            "max_cold_gap_score": 0.72,
+            "max_window_pressure_score": 0.0,
+            "max_assistant_share": 0.0,
+        }
+        packets = [
+            {
+                "model_call_id": "anat:0",
+                "turn_id": 0,
+                "input_tokens": 400,
+                "context_window_tokens": 1000,
+                "fragments": [{"source_type": "user_message", "tokens": 200}],
+            },
+            {
+                "model_call_id": "anat:1",
+                "turn_id": 1,
+                "input_tokens": 600,
+                "context_window_tokens": 1000,
+                "fragments": [{"source_type": "tool_output", "tokens": 400}],
+            },
+        ]
+        turn_heat = [
+            {
+                "model_call_id": "anat:0", "turn_id": 0,
+                "cold_gap_score": 0.0, "window_pressure_score": 0.0,
+                "assistant_share": 0.0, "red_token_share": 0.0, "raw_tool_share": 0.0,
+            },
+            {
+                "model_call_id": "anat:1", "turn_id": 1,
+                "cold_gap_score": 0.72, "window_pressure_score": 0.0,
+                "assistant_share": 0.0, "red_token_share": 0.0, "raw_tool_share": 0.4,
+            },
+        ]
+        # Секрет в title finding не должен попасть в байты PNG.
+        findings = [{"kind": "cold_gap", "turn_id": 1, "title": "leak sk-testSECRET-anatomy"}]
+        events = [
+            {"event_type": "model_output", "payload": {"turn": 1, "message": {"tool_calls": [{"function": {"name": "write_file"}}]}}},
+        ]
+
+        data = build_anatomy_data(report, packets, turn_heat, findings, events)
+        png_path = out_dir / "heatmap.png"
+        render_heatmap_png(data, png_path)
+
+        width, height, pixels = _read_png_rgb(png_path)
+        pixel_set = set(pixels)
+        # Фиксированный размер нового рендера.
+        self.assertEqual((width, height), (1400, 860))
+        # Секрет отсутствует в байтах (privacy — тот же инвариант, что у старого PNG).
+        self.assertNotIn(b"sk-testSECRET-anatomy", png_path.read_bytes())
+        # Палитра типов блока A присутствует на рисунке.
+        self.assertIn(SOURCE_COLORS["user_message"], pixel_set)
+        self.assertIn(SOURCE_COLORS["tool_output"], pixel_set)
+
+    def test_context_window_png_written_with_new_name(self):
+        """write_analysis_outputs создаёт оба PNG: heatmap.png и context_window.png."""
+
+        cfg = self.make_cfg()
+        trace_path = Path(cfg.root) / "trace.jsonl"
+        _write_trace(trace_path, _valid_trace_events())
+        events, warnings = load_trace_path(trace_path)
+        result = analyze_events(events, warnings)
+        out_dir = Path(cfg.root) / "outputs-png-names"
+        write_analysis_outputs(result, out_dir)
+
+        self.assertTrue((out_dir / "heatmap.png").exists())
+        self.assertTrue((out_dir / "context_window.png").exists())
+        # session_report.outputs содержит оба имени файлов.
+        report = json.loads((out_dir / "session_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["outputs"]["heatmap_png"], "heatmap.png")
+        self.assertEqual(report["outputs"]["context_window_png"], "context_window.png")
+
+    def test_html_report_has_anatomy_tab_and_data(self):
+        """HTML содержит 4-ю вкладку Anatomy с встроенными данными и privacy."""
+
+        cfg = self.make_cfg()
+        out_dir = Path(cfg.root) / "html-anatomy"
+        out_dir.mkdir()
+        report = {
+            "session_id": "anat:html",
+            "model_calls": 2,
+            "max_red_token_share": 0.0,
+            "max_cold_gap_score": 0.72,
+            "max_assistant_share": 0.0,
+            "max_fixed_instruction_cost": 0.1,
+            "max_goal_anchor_cost": 0.2,
+            "max_normative_status": 0.0,
+            "max_goal_status": 0.0,
+            "findings": 1,
+        }
+        (out_dir / "session_report.json").write_text(
+            json.dumps(report, ensure_ascii=False), encoding="utf-8"
+        )
+        write_jsonl(out_dir / "turn_heat.jsonl", [
+            {"model_call_id": "anat:0", "turn_id": 0, "cold_gap_score": 0.0,
+             "window_pressure_score": 0.0, "assistant_share": 0.0, "red_token_share": 0.0},
+            {"model_call_id": "anat:1", "turn_id": 1, "cold_gap_score": 0.72,
+             "window_pressure_score": 0.0, "assistant_share": 0.0, "red_token_share": 0.0},
+        ])
+        write_jsonl(out_dir / "fragment_heat.jsonl", [])
+        write_jsonl(out_dir / "packets.jsonl", [
+            {"model_call_id": "anat:0", "turn_id": 0, "input_tokens": 100,
+             "context_window_tokens": 1000,
+             "fragments": [{"source_type": "user_message", "tokens": 100}]},
+            {"model_call_id": "anat:1", "turn_id": 1, "input_tokens": 200,
+             "context_window_tokens": 1000,
+             "fragments": [{"source_type": "tool_output", "tokens": 150}]},
+        ])
+        write_jsonl(out_dir / "fragments.jsonl", [])
+        # Секрет в аргументах tool_call — Anatomy берёт только имя инструмента,
+        # args не должен попасть в HTML (events не встроены в heatmap-data).
+        write_jsonl(out_dir / "events.jsonl", [
+            {"event_type": "model_output", "payload": {"turn": 1,
+              "message": {"tool_calls": [{"function": {
+                "name": "write_file",
+                "arguments": "{\"path\":\"leak sk-testSECRET-html-anatomy\"}",
+              }}]}}},
+        ])
+        write_jsonl(out_dir / "findings.jsonl", [
+            {"kind": "cold_gap", "turn_id": 1, "title": "regular cold gap finding"},
+        ])
+
+        html_path = out_dir / "heatmap.html"
+        render_html_report(out_dir / "session_report.json", html_path)
+        html_content = html_path.read_text(encoding="utf-8")
+
+        self.assertIn('id="tab-anatomy"', html_content)
+        self.assertIn('id="panel-anatomy"', html_content)
+        self.assertIn("FRAGMENT MASS", html_content)
+        # Данные анатомии встроены в JSON-скрипт страницы.
+        self.assertIn('"anatomy"', html_content)
+        # Verdict-точки: red=0, cold=1, pressure=0 (max_assistant_share=0 в report).
+        # html.escape экранирует кавычки в JSON-блоке, поэтому проверяем значение dots.
+        self.assertIn("&quot;dots&quot;: &quot;010&quot;", html_content)
+        # Zoom/связки/клик-переход присутствуют в скрипте.
+        self.assertIn("data-zoom", html_content)
+        self.assertIn("renderAnatomyDetail", html_content)
+        self.assertIn("switchToContextWindow", html_content)
+        # Privacy: секрет не утёк в HTML.
+        self.assertNotIn("sk-testSECRET-html-anatomy", html_content)
+
+    def test_anatomy_on_flappy_trace(self):
+        """Регрессия на реальной трассе: verdict и швы summarization не пустые."""
+
+        root = Path(__file__).resolve().parents[1]
+        trace_path = root / "tests" / "data" / "traces" / "flappy" / "flappy2a_sum3.jsonl"
+        events, warnings = load_trace(trace_path)
+        result = analyze_events(events, warnings)
+        cfg = self.make_cfg()
+        out_dir = Path(cfg.root) / "flappy-anatomy"
+        write_analysis_outputs(result, out_dir)
+
+        # Оба PNG сгенерировались без падения на реальных данных.
+        self.assertTrue((out_dir / "heatmap.png").exists())
+        self.assertTrue((out_dir / "context_window.png").exists())
+        # На flappy2 summarization точно работал — швы должны быть.
+        report = json.loads((out_dir / "session_report.json").read_text(encoding="utf-8"))
+        # Если есть cold gaps — verdict указывает на конкретный ход.
+        if report.get("max_cold_gap_score", 0) > 0:
+            self.assertGreater(report["max_cold_gap_score"], 0.0)

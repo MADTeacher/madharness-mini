@@ -8,6 +8,7 @@
 - [Структура кода](code-overview.md)
 - [Слой контекста](context-layer.md)
 - [Как пользоваться context_heatmap](context-heatmap.md)
+- [Холодные гэпы: нереализованные направления](cold-gap-future-work.md)
 - [Agent Skills](agent-skills.md)
 - [MCP](mcp.md)
 - [Субагенты](subagents.md)

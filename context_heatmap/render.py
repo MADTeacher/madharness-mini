@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from .io import read_jsonl
+from .anatomy_data import build_anatomy_data
 
 
 FRAGMENT_TYPE_ORDER = {
@@ -62,6 +63,7 @@ def render_html_report(report_path: Path, out_path: Path) -> None:
         "packets": packets,
         "tool_call_names": _tool_call_names(events),
         "findings": findings,
+        "anatomy": _build_anatomy_for_html(report, packets, turn_heat, findings, events),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_render(payload), encoding="utf-8")
@@ -85,6 +87,7 @@ def _render(payload: dict) -> str:
         payload.get("tool_call_names", {}),
     )
     findings = _finding_list(payload["findings"])
+    anatomy_panel = _anatomy_panel(payload.get("anatomy") or {})
     session_id = html.escape(str(payload["report"].get("session_id") or "session"))
     return f"""<!doctype html>
 <html lang="ru">
@@ -157,6 +160,35 @@ def _render(payload: dict) -> str:
     .sev-medium {{ color: #b06000; font-weight: 700; }}
     .sev-low {{ color: #5f6368; font-weight: 700; }}
     code {{ background: #eef1f4; padding: 1px 4px; border-radius: 4px; }}
+    .anatomy {{ padding: 4px 0; }}
+    .anatomy-toolbar {{ display: flex; gap: 8px; align-items: center; margin-bottom: 12px; color: #5f6368; font-size: 12px; flex-wrap: wrap; }}
+    .anatomy-toolbar button {{ font: inherit; padding: 3px 10px; border: 1px solid #dde1e6; background: #fff; border-radius: 4px; cursor: pointer; }}
+    .anatomy-toolbar button:hover {{ background: #f1f3f4; }}
+    .anatomy-verdict {{ display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-weight: 700; color: #202124; }}
+    .anatomy-verdict .dots {{ display: inline-flex; gap: 3px; }}
+    .anatomy-verdict .dot {{ width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.25); }}
+    .anatomy-zoom-wrap {{ overflow-x: auto; border: 1px solid #dde1e6; border-radius: 8px; background: #fff; padding: 12px; }}
+    .anatomy-zoom {{ transform-origin: top left; transition: transform .12s; }}
+    .anatomy-grid {{ display: grid; grid-template-columns: 110px 1fr; gap: 0; min-width: 100%; }}
+    .anatomy-row {{ display: contents; }}
+    .anatomy-label {{ display: flex; align-items: center; padding: 6px 10px; font-size: 11px; color: #3c4043; font-weight: 700; border-bottom: 1px solid #f1f3f4; white-space: nowrap; }}
+    .anatomy-track {{ position: relative; display: flex; align-items: flex-end; height: 46px; border-bottom: 1px solid #f1f3f4; }}
+    .anatomy-cell {{ flex: 1 1 0; min-width: 2px; position: relative; cursor: pointer; }}
+    .anatomy-cell:hover, .anatomy-cell.linked {{ outline: 2px solid #174ea6; outline-offset: -1px; z-index: 2; }}
+    .anatomy-mass {{ align-items: flex-end; height: 220px; }}
+    .anatomy-mass .anatomy-cell {{ background: #fff; overflow: hidden; }}
+    .anatomy-mass .anatomy-cell .seg {{ position: absolute; left: 0; right: 0; }}
+    .anatomy-threshold {{ position: absolute; left: 0; right: 0; border-top: 1px dashed #b26a00; pointer-events: none; }}
+    .anatomy-cold {{ height: 34px; align-items: center; }}
+    .anatomy-cold .marker {{ width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; transform: rotate(45deg); background: #1558d6; margin: 0 auto; cursor: pointer; }}
+    .anatomy-action {{ height: 34px; align-items: center; }}
+    .anatomy-action .act {{ width: 6px; height: 20px; margin: 0 1px; border-radius: 2px; cursor: pointer; display: inline-block; }}
+    .anatomy-action .act:hover, .anatomy-action .act.linked {{ outline: 2px solid #174ea6; }}
+    .anatomy-seam {{ position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid #78808a; opacity: .5; pointer-events: none; }}
+    .anatomy-seam.truncated {{ border-left: 1px dashed #b26a00; opacity: .8; }}
+    .anatomy-axis {{ display: flex; padding: 6px 0 0 110px; color: #5f6368; font-size: 11px; position: relative; }}
+    .anatomy-axis .tick {{ position: absolute; transform: translateX(-50%); }}
+    .anatomy-tooltip {{ position: fixed; z-index: 1000; max-width: 360px; background: #202124; color: #fff; padding: 6px 10px; border-radius: 6px; font-size: 12px; line-height: 1.4; pointer-events: none; box-shadow: 0 4px 12px rgba(0,0,0,.25); }}
     @media (max-width: 900px) {{ main {{ grid-template-columns: 1fr; padding: 16px; }} header {{ padding: 20px 16px 10px; }} }}
   </style>
 </head>
@@ -179,6 +211,7 @@ def _render(payload: dict) -> str:
       <div class="tabs" role="tablist" aria-label="Context heatmap views">
         <button class="tab-button" id="tab-fragment-heat" role="tab" aria-selected="true" aria-controls="panel-fragment-heat" data-tab-target="panel-fragment-heat">Fragment Heat</button>
         <button class="tab-button" id="tab-context-window" role="tab" aria-selected="false" aria-controls="panel-context-window" data-tab-target="panel-context-window">Context Window</button>
+        <button class="tab-button" id="tab-anatomy" role="tab" aria-selected="false" aria-controls="panel-anatomy" data-tab-target="panel-anatomy">Anatomy</button>
         <button class="tab-button" id="tab-findings" role="tab" aria-selected="false" aria-controls="panel-findings" data-tab-target="panel-findings">Findings</button>
       </div>
       <section class="tab-panel heatmap" id="panel-fragment-heat" role="tabpanel" aria-labelledby="tab-fragment-heat">
@@ -188,6 +221,10 @@ def _render(payload: dict) -> str:
       <section class="tab-panel" id="panel-context-window" role="tabpanel" aria-labelledby="tab-context-window" hidden>
         <h2>Context Window</h2>
         {columns}
+      </section>
+      <section class="tab-panel" id="panel-anatomy" role="tabpanel" aria-labelledby="tab-anatomy" hidden>
+        <h2>Anatomy</h2>
+        {anatomy_panel}
       </section>
       <section class="tab-panel" id="panel-findings" role="tabpanel" aria-labelledby="tab-findings" hidden>
         <h2>Findings</h2>
@@ -261,11 +298,451 @@ def _render(payload: dict) -> str:
         }}
         return String(value);
       }}
+
+      // --- Вкладка Anatomy: zoom, hover-tooltip, связки cold<->action, клик-переход ---
+      const anatomyPanel = document.getElementById("panel-anatomy");
+      if (anatomyPanel) {{
+        const zoomEl = anatomyPanel.querySelector(".anatomy-zoom");
+        const scaleLabel = document.getElementById("anatomy-scale-label");
+        let scale = 1.0;
+        const applyScale = () => {{
+          if (zoomEl) zoomEl.style.transform = `scale(${{scale.toFixed(2)}})`;
+          if (scaleLabel) scaleLabel.textContent = `${{Math.round(scale * 100)}}%`;
+        }};
+        for (const btn of anatomyPanel.querySelectorAll("[data-zoom]")) {{
+          btn.addEventListener("click", () => {{
+            const action = btn.getAttribute("data-zoom");
+            if (action === "in") scale = Math.min(scale + 0.25, 4.0);
+            else if (action === "out") scale = Math.max(scale - 0.25, 0.5);
+            else scale = 1.0;
+            applyScale();
+          }});
+        }}
+        // Ctrl+wheel = zoom по оси времени — удобно на длинных сессиях.
+        const wrap = anatomyPanel.querySelector(".anatomy-zoom-wrap");
+        if (wrap) {{
+          wrap.addEventListener("wheel", (event) => {{
+            if (!event.ctrlKey && !event.metaKey) return;
+            event.preventDefault();
+            scale = Math.min(Math.max(scale - Math.sign(event.deltaY) * 0.2, 0.5), 4.0);
+            applyScale();
+          }}, {{ passive: false }});
+        }}
+
+        // Tooltip показывает data-detail любой ячейки/маркера/действия.
+        let tooltip = null;
+        const ensureTooltip = () => {{
+          if (!tooltip) {{
+            tooltip = document.createElement("div");
+            tooltip.className = "anatomy-tooltip";
+            document.body.appendChild(tooltip);
+          }}
+          return tooltip;
+        }};
+        const renderAnatomyDetail = (detail) => {{
+          if (!detail || typeof detail !== "object") return "<i>no detail</i>";
+          const parts = [];
+          const labelMap = {{
+            turn: "turn", type: "signal", value: "score", tool: "tool",
+            group: "group", fill_share: "fill share", used_tokens: "used tokens",
+            window_tokens: "window tokens",
+          }};
+          for (const [key, value] of Object.entries(detail)) {{
+            const label = labelMap[key] || key;
+            let shown = value;
+            if (typeof value === "number") shown = (Math.round(value * 10000) / 10000);
+            parts.push(`<b>${{label}}</b>: ${{shown}}`);
+          }}
+          return parts.join("<br>");
+        }};
+        for (const el of anatomyPanel.querySelectorAll("[data-detail]")) {{
+          el.addEventListener("mouseenter", (event) => {{
+            const raw = el.getAttribute("data-detail") || "{{}}";
+            let detail = {{}};
+            try {{ detail = JSON.parse(raw); }} catch (_e) {{ detail = {{ error: "invalid" }}; }}
+            const tip = ensureTooltip();
+            tip.innerHTML = renderAnatomyDetail(detail);
+            tip.style.display = "block";
+            const rect = event.target.getBoundingClientRect();
+            tip.style.left = (rect.left + 12) + "px";
+            tip.style.top = (rect.top + 12) + "px";
+            // Связки: подсвечиваем элементы того же turn.
+            const turn = detail.turn;
+            if (turn !== undefined) {{
+              for (const other of anatomyPanel.querySelectorAll(`[data-turn="${{turn}}"]`)) {{
+                if (other !== el) other.classList.add("linked");
+              }}
+            }}
+          }});
+          el.addEventListener("mouseleave", () => {{
+            if (tooltip) tooltip.style.display = "none";
+            for (const other of anatomyPanel.querySelectorAll(".linked")) {{
+              other.classList.remove("linked");
+            }}
+          }});
+        }}
+
+        // Клик по cold marker / action / массе — переключаемся на Context Window
+        // и скроллим к колонке того же turn.
+        const switchToContextWindow = (turn) => {{
+          const cwTab = document.getElementById("tab-context-window");
+          if (cwTab) cwTab.click();
+          // Колонка Context Window идентифицируется по data-model-call-id, а turn —
+          // по подписи "turn N" в мете; ищем текстовое совпадение.
+          setTimeout(() => {{
+            const metas = document.querySelectorAll(".context-column-meta strong");
+            for (const meta of metas) {{
+              if (meta.textContent === `turn ${{turn}}`) {{
+                const col = meta.closest(".context-column-wrap");
+                if (col && col.scrollIntoView) col.scrollIntoView({{ behavior: "smooth", inline: "center", block: "nearest" }});
+                break;
+              }}
+            }}
+          }}, 40);
+        }};
+        for (const el of anatomyPanel.querySelectorAll("[data-cold], .anatomy-action .act, .anatomy-mass .anatomy-cell")) {{
+          el.addEventListener("click", () => {{
+            const turn = el.getAttribute("data-turn");
+            if (turn !== null) switchToContextWindow(turn);
+          }});
+        }}
+      }}
     }})();
   </script>
 </body>
 </html>
 """
+
+
+def _anatomy_panel(data: dict) -> str:
+    """Строим статичную разметку вкладки Anatomy по данным build_anatomy_data.
+
+    Разметка намеренно плотная: каждая дорожка — grid-строка ячеек по ходам.
+    Интерактив (zoom, hover-tooltip, связки cold↔action, клик-переход к Context
+    Window) добавляется отдельным скриптом ниже, чтобы Python-часть оставалась
+    чистой генерацией HTML.
+    """
+
+    if not data or data.get("error"):
+        return '<p class="context-detail-empty">Нет данных для вкладки Anatomy.</p>'
+
+    columns = data.get("columns") or []
+    if not columns:
+        return '<p class="context-detail-empty">Нет обращений к модели.</p>'
+
+    source_types = data.get("source_types") or []
+    cold_turns = set(data.get("cold_turns") or [])
+    actions_by_turn = data.get("actions_by_turn") or {}
+    seams = {int(s.get("turn_id")): s for s in (data.get("seams") or []) if isinstance(s, dict)}
+    thresholds = data.get("thresholds") or {}
+    verdict = data.get("verdict") or {}
+    metrics = data.get("metrics") or {}
+    groups = data.get("action_groups") or {}
+    name_to_group = {n: g for g, names in groups.items() for n in names}
+
+    toolbar = _anatomy_toolbar(verdict, metrics)
+    mass_row = _anatomy_mass_row(columns, source_types)
+    cold_row = _anatomy_signal_row(columns, "cold_gap_score", "#1558d6", thresholds, cold_only=True)
+    press_row = _anatomy_signal_row(columns, "window_pressure_score", "#b26a00", thresholds)
+    red_row = _anatomy_signal_row(columns, "red_token_share", "#be261e", thresholds)
+    fill_row = _anatomy_signal_row(columns, "fill_share", "#5a6473", thresholds, fill=True)
+    cold_marker_row = _anatomy_cold_marker_row(columns, cold_turns)
+    action_row = _anatomy_action_row(columns, actions_by_turn, name_to_group)
+    axis = _anatomy_axis(columns)
+    seams_layer = _anatomy_seams_layer(columns, seams)
+
+    return (
+        '<div class="anatomy">'
+        f"{toolbar}"
+        '<div class="anatomy-zoom-wrap">'
+        '<div class="anatomy-zoom">'
+        '<div class="anatomy-grid">'
+        f"{mass_row}"
+        '<div class="anatomy-row"><div class="anatomy-label">COLD GAP</div>'
+        f'<div class="anatomy-track">{cold_row}</div></div>'
+        '<div class="anatomy-row"><div class="anatomy-label">PRESSURE</div>'
+        f'<div class="anatomy-track">{press_row}</div></div>'
+        '<div class="anatomy-row"><div class="anatomy-label">RED TOKEN</div>'
+        f'<div class="anatomy-track">{red_row}</div></div>'
+        '<div class="anatomy-row"><div class="anatomy-label">WINDOW FILL</div>'
+        f'<div class="anatomy-track">{fill_row}</div></div>'
+        '<div class="anatomy-row"><div class="anatomy-label">COLD MARKER</div>'
+        f'<div class="anatomy-track anatomy-cold">{cold_marker_row}</div></div>'
+        '<div class="anatomy-row"><div class="anatomy-label">ACTION</div>'
+        f'<div class="anatomy-track anatomy-action">{action_row}</div></div>'
+        "</div>"
+        f"{seams_layer}"
+        "</div>"
+        f"{axis}"
+        "</div>"
+        "</div>"
+    )
+
+
+def _anatomy_toolbar(verdict: dict, metrics: dict) -> str:
+    """Панель инструментов: zoom-кнопки + verdict-индикатор с peak-указателем."""
+
+    dots = str(verdict.get("dots") or "000")
+    signals = (
+        ("R", "#be261e", dots[0] if len(dots) > 0 else "0"),
+        ("C", "#1558d6", dots[1] if len(dots) > 1 else "0"),
+        ("P", "#b26a00", dots[2] if len(dots) > 2 else "0"),
+    )
+    dot_html = []
+    for _short, color, state in signals:
+        bg = f"background:{color};" if state == "1" else "background:#fff;"
+        dot_html.append(f'<span class="dot" style="{bg}" title="{_short}"></span>')
+    peak = verdict.get("peak_turn")
+    label = html.escape(str(verdict.get("label") or ""))
+    hint = html.escape(str(verdict.get("hint") or ""))
+    peak_text = f" · peak turn {html.escape(str(peak))}" if peak is not None else ""
+    return (
+        '<div class="anatomy-toolbar">'
+        '<button type="button" data-zoom="out" title="zoom out">−</button>'
+        '<span id="anatomy-scale-label">100%</span>'
+        '<button type="button" data-zoom="in" title="zoom in">+</button>'
+        '<button type="button" data-zoom="reset" title="reset zoom">reset</button>'
+        '<span>cells: ' + html.escape(str(metrics.get("model_calls", 0))) + '</span>'
+        '<span class="anatomy-verdict">'
+        '<span class="dots">' + "".join(dot_html) + '</span>'
+        f'<span>{label}</span>'
+        f'<span style="color:#5f6368;font-weight:400">{html.escape(peak_text)}</span>'
+        f'<span style="color:#5f6368;font-weight:400"> · {hint}</span>'
+        "</span>"
+        "</div>"
+    )
+
+
+def _anatomy_mass_row(columns: list[dict], source_types: list[str]) -> str:
+    """Блок A: масса фрагментов по типам — вертикальная укладка типов в ячейке."""
+
+    cells = []
+    for column in columns:
+        window_tokens = max(_safe_int(column.get("window_tokens")), 1)
+        used_tokens = max(min(_safe_int(column.get("used_tokens")), window_tokens), 0)
+        tokens_by_type = column.get("tokens_by_type") or {}
+        turn_id = _safe_int(column.get("turn_id"))
+        # Сегменты идём снизу вверх, поэтому набираем как список (top, height, color).
+        segments = []
+        cursor = 0
+        for source_type in source_types:
+            tokens = max(_safe_int(tokens_by_type.get(source_type)), 0)
+            if not tokens:
+                continue
+            seg_start = min(cursor, used_tokens)
+            seg_end = min(cursor + tokens, used_tokens)
+            cursor = seg_end
+            if seg_end <= seg_start:
+                continue
+            top_pct = 100.0 * (1.0 - seg_end / window_tokens)
+            height_pct = 100.0 * (seg_end - seg_start) / window_tokens
+            color = _html_source_color(source_type)
+            segments.append(
+                f'<span class="seg" style="top:{top_pct:.2f}%;height:{height_pct:.2f}%;background:{color}"></span>'
+            )
+        cell_detail = html.escape(json.dumps({
+            "turn": turn_id,
+            "type": "mass",
+            "fill_share": column.get("fill_share"),
+            "used_tokens": used_tokens,
+            "window_tokens": window_tokens,
+        }, ensure_ascii=False), quote=True)
+        cells.append(
+            f'<div class="anatomy-cell" data-turn="{turn_id}" data-detail="{cell_detail}">'
+            + "".join(segments)
+            + "</div>"
+        )
+    return (
+        '<div class="anatomy-row"><div class="anatomy-label">FRAGMENT MASS</div>'
+        f'<div class="anatomy-track anatomy-mass">{"".join(cells)}</div></div>'
+    )
+
+
+def _anatomy_signal_row(
+    columns: list[dict],
+    key: str,
+    color: str,
+    thresholds: dict,
+    *,
+    cold_only: bool = False,
+    fill: bool = False,
+) -> str:
+    """Дорожка сигнала блока B: ячейка красится по интенсивности значения."""
+
+    cells = []
+    for column in columns:
+        value = max(0.0, min(1.0, _safe_float(column.get(key))))
+        intensity = max(0.15, value) if value > 0 else 0.0
+        bg = _hex_with_alpha(color, intensity) if value > 0 else "transparent"
+        turn_id = _safe_int(column.get("turn_id"))
+        detail = html.escape(json.dumps({
+            "turn": turn_id,
+            "type": key,
+            "value": round(value, 4),
+        }, ensure_ascii=False), quote=True)
+        cell = (
+            f'<div class="anatomy-cell" data-turn="{turn_id}" data-detail="{detail}" '
+            f'style="background:{bg}"></div>'
+        )
+        cells.append(cell)
+    inner = "".join(cells)
+    if fill:
+        # Пороговые линии 0.75 / 0.90 — калибровка глаз для заполненности окна.
+        for ratio, label, border in (
+            (thresholds.get("fill_warning", 0.75), "warning", "#b26a00"),
+            (thresholds.get("fill_danger", 0.90), "danger", "#be261e"),
+        ):
+            top_pct = 100.0 * (1.0 - float(ratio))
+            inner += (
+                f'<span class="anatomy-threshold" style="top:{top_pct:.2f}%;border-top-color:{border}" '
+                f'title="{label} {ratio}"></span>'
+            )
+    return inner
+
+
+def _anatomy_cold_marker_row(columns: list[dict], cold_turns: set[int]) -> str:
+    """Узкая дорожка ромбов-маркеров в ходах cold gap."""
+
+    cells = []
+    for column in columns:
+        turn_id = _safe_int(column.get("turn_id"))
+        if turn_id in cold_turns:
+            cells.append(
+                f'<span class="marker" data-turn="{turn_id}" data-cold="1" '
+                f'title="cold gap at turn {turn_id}"></span>'
+            )
+        cells.append('<span style="flex:1 1 0;min-width:2px"></span>')
+    return "".join(cells)
+
+
+def _anatomy_action_row(
+    columns: list[dict],
+    actions_by_turn: dict,
+    name_to_group: dict,
+) -> str:
+    """Дорожка действий: цветные квадратики read/write/patch/list/run."""
+
+    group_colors = {
+        "read": "#56a6d9",
+        "write": "#be261e",
+        "test": "#64b45d",
+        "list": "#969ca4",
+        "run": "#f5a623",
+        "other": "#787880",
+    }
+    cells = []
+    for column in columns:
+        turn_id = _safe_int(column.get("turn_id"))
+        names = actions_by_turn.get(turn_id) or actions_by_turn.get(str(turn_id)) or []
+        acts = []
+        for name in names[:4]:
+            group = name_to_group.get(str(name), "other")
+            color = group_colors.get(group, group_colors["other"])
+            detail = html.escape(json.dumps({
+                "turn": turn_id,
+                "type": "action",
+                "tool": name,
+                "group": group,
+            }, ensure_ascii=False), quote=True)
+            acts.append(
+                f'<span class="act" data-turn="{turn_id}" data-detail="{detail}" '
+                f'style="background:{color}" title="{html.escape(str(name))}"></span>'
+            )
+        cells.append(f'<span style="flex:1 1 0;min-width:2px;display:flex;justify-content:center">{"".join(acts)}</span>')
+    return "".join(cells)
+
+
+def _anatomy_seams_layer(columns: list[dict], seams: dict[int, dict]) -> str:
+    """Слой швов summarization поверх всех дорожек. Абсолютное позиционирование."""
+
+    if not columns:
+        return ""
+    total = len(columns)
+    marks = []
+    for index, column in enumerate(columns):
+        turn_id = _safe_int(column.get("turn_id"))
+        seam = seams.get(turn_id)
+        if not seam:
+            continue
+        left_pct = 100.0 * index / total
+        truncated = bool(seam.get("truncated"))
+        cls = "anatomy-seam truncated" if truncated else "anatomy-seam"
+        summary = (
+            f"truncated, dropped {seam.get('dropped', 0)}"
+            if truncated
+            else f"summarized {seam.get('summarized', 0)} entries"
+        )
+        marks.append(
+            f'<span class="{cls}" data-turn="{turn_id}" style="left:calc(110px + {left_pct:.3f}% * (100% - 110px) / 100)" title="turn {turn_id}: {html.escape(summary)}"></span>'
+        )
+    return f'<div class="anatomy-seams" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none">{"".join(marks)}</div>'
+
+
+def _anatomy_axis(columns: list[dict]) -> str:
+    """Подписи номеров ходов под дорожками."""
+
+    total = len(columns)
+    step = max(1, total // 10)
+    ticks = []
+    for index in range(0, total, step):
+        turn_id = _safe_int(columns[index].get("turn_id"), index)
+        left_pct = 100.0 * index / total
+        ticks.append(
+            f'<span class="tick" style="left:calc({left_pct:.3f}% )">{turn_id}</span>'
+        )
+    return f'<div class="anatomy-axis">{"&nbsp;" * 0}{"".join(ticks)}</div>'
+
+
+def _html_source_color(source_type: str) -> str:
+    """HEX-цвет типа для CSS — тот же оттенок, что в PNG SOURCE_COLORS."""
+
+    palette = {
+        "system_instruction": "#f4b6b5",
+        "developer_instruction": "#f2994a",
+        "user_message": "#56a6d9",
+        "context_fragment": "#9ccf75",
+        "file_snippet": "#6fc2b0",
+        "test_result": "#64b45d",
+        "tool_schema": "#f6e4a7",
+        "assistant_message": "#b79fe6",
+        "tool_output": "#c23a52",
+        "unknown": "#c9ced6",
+    }
+    return palette.get(source_type, palette["unknown"])
+
+
+def _hex_with_alpha(hex_color: str, alpha: float) -> str:
+    """RGBA-строка для heatmap-интенсивности блока B."""
+
+    alpha = max(0.0, min(1.0, alpha))
+    rgb = _hex_to_rgb(hex_color)
+    return f"rgba({rgb[0]},{rgb[1]},{rgb[2]},{alpha:.3f})"
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    value = hex_color.lstrip("#")
+    if len(value) == 6:
+        return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+    return (120, 120, 130)
+
+
+def _build_anatomy_for_html(
+    report: dict,
+    packets: list[dict],
+    turn_heat: list[dict],
+    findings: list[dict],
+    events: list[dict],
+) -> dict:
+    """Собираем данные вкладки Anatomy через общий агрегатор anatomy_data.
+
+    Оборачиваем в try, чтобы неработающая анатомия не ломала весь HTML —
+    на проблемной сессии лучше показать пустую вкладку, чем уронить рендер.
+    """
+
+    try:
+        return build_anatomy_data(report, packets, turn_heat, findings, events)
+    except Exception:  # noqa: BLE001 — диагностика не должна валить HTML
+        return {"error": "anatomy build failed", "columns": [], "cold_turns": [], "seams": [], "actions_by_turn": {}, "verdict": {"dots": "000", "label": "ERROR", "peak_turn": None, "hint": ""}, "metrics": {}, "source_types": [], "action_groups": {}, "thresholds": {}}
 
 
 def _context_window_columns(

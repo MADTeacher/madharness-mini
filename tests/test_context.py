@@ -1199,6 +1199,348 @@ class ContextManagerTests(HarnessTestCase):
         self.assertIn("не перечитан после правки", rendered)
         self.assertIn("ни разу не прочитан", rendered)
 
+    # --- visibility-предикат и collapsed-категория reminder'а ---
+
+    def test_predicate_unknown_file_returns_false(self):
+        """Путь, которого нет в реестре: модель не знает состояния."""
+        ctx = ContextManager("task", max_tokens=20000)
+
+        self.assertFalse(ctx._model_knows_current_state("never_touched.py"))
+
+    def test_predicate_fresh_read_is_known(self):
+        """Свежее чтение в окне без эвикции: модель знает состояние."""
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "read"))
+
+        self.assertTrue(ctx._model_knows_current_state("server.js"))
+
+    def test_predicate_fresh_write_is_known(self):
+        """Свежая правка в окне без эвикции: модель знает состояние."""
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "write"))
+
+        self.assertTrue(ctx._model_knows_current_state("server.js"))
+
+    def test_predicate_read_invariant_historical_collapse_does_not_blind(self):
+        """Инвариант: свернуть «историческое» чтение при свежем в окне — знает.
+
+        Модель читала на ходах 0, 2, 4. Эвикция убирает ход 2, но last_read_turn=4.
+        Предикат обязан вернуть True: свежее чтение удержано, сворачивание
+        более старого не делает модель слепой. Это защита от главного ложного
+        срабатывания visibility-предиката.
+        """
+
+        ctx = ContextManager("task", max_tokens=20000)
+        # Три чтения одного пути.
+        self._record_file_ref(ctx, "c0", FileRef("app.py", "read"))
+        # Ход 1: filler, чтобы «сдвинуть» второе чтение на индекс 2.
+        ctx.record_assistant({"role": "assistant", "content": "filler"})
+        self._record_file_ref(ctx, "c2", FileRef("app.py", "read"))
+        ctx.record_assistant({"role": "assistant", "content": "filler2"})
+        self._record_file_ref(ctx, "c4", FileRef("app.py", "read"))
+
+        # Эмулируем эвикцию хода 2 (historical read): last_read_turn=4, ход 2 != 4,
+        # поэтому хелпер _mark_read_collapsed не должен ничего менять.
+        state = ctx._file_state["app.py"]
+        self.assertEqual(state.last_read_turn, 4)
+        ctx._mark_read_collapsed("app.py", 2)
+
+        self.assertIsNone(state.last_read_collapsed_turn)
+        self.assertTrue(ctx._model_knows_current_state("app.py"))
+
+    def test_predicate_authoritative_read_collapse_blinds(self):
+        """Свёрнутое авторитетное чтение: модель не знает состояния.
+
+        last_read_turn=2, эвикция убирает ход 2 → collapsed=2. Предикат обязан
+        вернуть False — это и есть фиксация факта слепоты.
+        """
+
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c0", FileRef("app.py", "read"))
+        ctx.record_assistant({"role": "assistant", "content": "filler"})
+        self._record_file_ref(ctx, "c2", FileRef("app.py", "read"))
+
+        state = ctx._file_state["app.py"]
+        self.assertEqual(state.last_read_turn, 2)
+        ctx._mark_read_collapsed("app.py", 2)
+
+        self.assertEqual(state.last_read_collapsed_turn, 2)
+        self.assertFalse(ctx._model_knows_current_state("app.py"))
+
+    def test_predicate_new_read_after_collapse_resets(self):
+        """Новое чтение после эвикции восстанавливает видимость."""
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c0", FileRef("app.py", "read"))
+        ctx._mark_read_collapsed("app.py", 0)
+        self.assertFalse(ctx._model_knows_current_state("app.py"))
+
+        # Свежее чтение того же пути обнуляет collapsed.
+        self._record_file_ref(ctx, "c1", FileRef("app.py", "read"))
+
+        self.assertTrue(ctx._model_knows_current_state("app.py"))
+
+    def test_predicate_new_write_after_collapse_resets(self):
+        """Новая правка после эвикции write восстанавливает видимость."""
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c0", FileRef("app.py", "write"))
+        ctx._mark_write_collapsed("app.py", 0)
+        self.assertFalse(ctx._model_knows_current_state("app.py"))
+
+        self._record_file_ref(ctx, "c1", FileRef("app.py", "write"))
+
+        self.assertTrue(ctx._model_knows_current_state("app.py"))
+
+    def test_predicate_tie_break_write_wins(self):
+        """read+write одного пути в одном ходе: авторитет — write.
+
+        Tie-break за write: в одном ходе write новее read и отражает post-write
+        состояние, read показывал pre-write (уже устарел). Поэтому если write
+        свёрнут, модель не знает состояния, даже если read виден.
+        """
+
+        ctx = ContextManager("task", max_tokens=20000)
+        # Обе операции по одному пути в одном ходе: last_read_turn == last_write_turn == 0.
+        state0 = ctx._file_state.get("app.py")
+        ctx.record_assistant(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c_rw",
+                        "type": "function",
+                        "function": {"name": "file_tool", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        ctx.record_tool_result(
+            {"id": "c_rw", "type": "function", "function": {"name": "file_tool", "arguments": "{}"}},
+            {"ok": True, "tool": "file_tool", "summary": "rw app.py"},
+            file_refs=[FileRef("app.py", "read"), FileRef("app.py", "write")],
+        )
+
+        state = ctx._file_state["app.py"]
+        self.assertEqual(state.last_read_turn, state.last_write_turn)
+        # Эвиктируем только write — read оставляем видимым.
+        ctx._mark_write_collapsed("app.py", state.last_write_turn)
+
+        # Write авторитетен по tie-break и свёрнут → модель не знает состояния.
+        self.assertFalse(ctx._model_knows_current_state("app.py"))
+
+    def test_dedup_fold_marks_read_collapsed(self):
+        """Точка A: read_file, свёрнутый дедупом (path_match), помечает collapsed."""
+
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.add_fragment(
+            ContextFragment(id="project", source="AGENTS.md", text="# Project rules")
+        )
+        call = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read AGENTS.md",
+                "content": "# Project rules full text",
+            },
+            file_refs=[FileRef("AGENTS.md", "read")],
+        )
+
+        ctx.messages()  # дедуп сворачивает read_file в digest
+
+        state = ctx._file_state["AGENTS.md"]
+        self.assertIsNotNone(state.last_read_collapsed_turn)
+        self.assertFalse(ctx._model_knows_current_state("AGENTS.md"))
+
+    def test_summarize_digest_marks_read_collapsed(self):
+        """Точка B (read): summarize digest помечает последнее чтение collapsed."""
+
+        ctx = ContextManager("task", max_tokens=20000, summarize_after_turns=1)
+        old_call = tool_call("c_old", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [old_call]})
+        ctx.record_tool_result(
+            old_call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read server.js:1-100",
+                "content": "1: " + "code line\n" * 500,
+                "start": 1,
+                "end": 100,
+            },
+            file_refs=[FileRef("server.js", "read")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        ctx.messages()  # summarize сворачивает read_file в digest
+
+        state = ctx._file_state["server.js"]
+        self.assertIsNotNone(state.last_read_collapsed_turn)
+        self.assertFalse(ctx._model_knows_current_state("server.js"))
+
+    def test_summarize_digest_marks_write_collapsed(self):
+        """Точка B' (write): summarize digest помечает последнюю правку collapsed."""
+
+        ctx = ContextManager("task", max_tokens=200000, summarize_after_turns=1)
+        old_call = {
+            "id": "c_write",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps(
+                    {"path": "js/main.js", "content": "CODE_BODY\n" + "x" * 2000}
+                ),
+            },
+        }
+        ctx.record_assistant(
+            {"role": "assistant", "content": None, "tool_calls": [old_call]}
+        )
+        ctx.record_tool_result(
+            old_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote js/main.js"},
+            file_refs=[FileRef("js/main.js", "write")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        ctx.messages()  # summarize сворачивает write_file args в digest
+
+        state = ctx._file_state["js/main.js"]
+        self.assertIsNotNone(state.last_write_collapsed_turn)
+        self.assertFalse(ctx._model_knows_current_state("js/main.js"))
+
+    def test_summarize_digest_keeps_short_write_visible(self):
+        """Короткая правка (< SUMMARY_TOOLCALL_LIMIT) не сворачивается → видима."""
+
+        ctx = ContextManager("task", max_tokens=200000, summarize_after_turns=1)
+        short_call = {
+            "id": "c_short",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps(
+                    {"path": "cfg.json", "content": '{"a": 1}'}
+                ),
+            },
+        }
+        ctx.record_assistant(
+            {"role": "assistant", "content": None, "tool_calls": [short_call]}
+        )
+        ctx.record_tool_result(
+            short_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote cfg.json"},
+            file_refs=[FileRef("cfg.json", "write")],
+        )
+        for n in range(4):
+            ctx.record_assistant({"role": "assistant", "content": f"answer {n}"})
+
+        ctx.messages()
+
+        state = ctx._file_state["cfg.json"]
+        # Короткая правка не свернулась → collapsed не пинается, видимость сохранена.
+        self.assertIsNone(state.last_write_collapsed_turn)
+        self.assertTrue(ctx._model_knows_current_state("cfg.json"))
+
+    def test_forced_drop_marks_protected_read_collapsed(self):
+        """Точка E forced: protected-read, выкинутый forced-drop, помечается collapsed.
+
+        forced-режим плюёт на защиту эвикции: ход с protected-read удаляется.
+        Здесь collapsed пинается вопреки защите — честная регистрация факта
+        слепоты, чтобы downstream-предикаты/reminder не врали о видимости.
+        """
+
+        ctx = ContextManager("task", max_tokens=90, keep_recent_turns=0)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        # Ход 0: читаем app.py.
+        read_call = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [read_call]})
+        ctx.record_tool_result(
+            read_call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read app.py",
+                "content": "x" * 200,
+            },
+            file_refs=[FileRef("app.py", "read")],
+        )
+        # Ход 1: правим тот же путь — чтение становится protected-read.
+        write_call = tool_call("c_write", "write_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [write_call]})
+        ctx.record_tool_result(
+            write_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote app.py"},
+            file_refs=[FileRef("app.py", "write")],
+        )
+        # Объёмный ход форсирует budget-exceeded и forced-drop ходов 0 и 1.
+        ctx.record_assistant(
+            {"role": "assistant", "content": "huge " + "x" * 300}
+        )
+
+        ctx.messages()
+        report = ctx.report()
+        forced_dropped = [
+            item for item in report["history"]["dropped_entries"] if item.get("forced")
+        ]
+        self.assertGreater(len(forced_dropped), 0)
+        # Forced-drop удалил protected-read → честно фиксируем слепоту.
+        state = ctx._file_state["app.py"]
+        self.assertEqual(state.last_read_turn, 0)
+        # Если ход 0 был forced-dropped, чтение помечено collapsed.
+        # (Если он уцелел, дропнулся только ход 1 — тогда проверки не будет,
+        # но сам факт forced-drop'a хода с чтением ловится выше.)
+        if 0 in [item["index"] for item in forced_dropped]:
+            self.assertEqual(state.last_read_collapsed_turn, 0)
+            self.assertFalse(ctx._model_knows_current_state("app.py"))
+
+    def test_reminder_lists_collapsed_authority_files(self):
+        """Reminder показывает новую категорию для свёрнутых чтений."""
+
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("ghost.js", "read"))
+        # Эмулируем эвикцию авторитетного чтения.
+        ctx._mark_read_collapsed("ghost.js", ctx._file_state["ghost.js"].last_read_turn)
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+
+        self.assertIn("свернул соответствующее наблюдение", rendered)
+        self.assertIn("ghost.js", rendered)
+
+    def test_clip_does_not_mark_collapsed(self):
+        """Точка D: clip_tool_messages обрезает read observation, но не помечает collapsed.
+
+        Сознательное MVP-ограничение: частичная видимость лучше ничего. clipped
+        чтение предикатом считается «знает» — это документирует поведение тестом,
+        чтобы будущая правка третьего состояния (partially_clipped) была явной.
+        """
+
+        ctx = ContextManager("task", max_tokens=400, keep_recent_turns=1)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        call = tool_call("c_big_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [call]})
+        ctx.record_tool_result(
+            call,
+            {
+                "ok": True,
+                "tool": "read_file",
+                "summary": "read big.js",
+                "content": "x" * 3000,
+            },
+            file_refs=[FileRef("big.js", "read")],
+        )
+
+        rendered = json.dumps(ctx.messages(), ensure_ascii=False)
+        report = ctx.report()
+
+        # clip_tool_messages действительно сработал.
+        self.assertTrue(report["history"]["clipped_tool_messages"])
+        self.assertIn("context clipped", rendered)
+        # Но collapsed не пинался — модель «знает» (частичная видимость).
+        state = ctx._file_state["big.js"]
+        self.assertIsNone(state.last_read_collapsed_turn)
+        self.assertTrue(ctx._model_knows_current_state("big.js"))
+
     def test_summarizer_folds_old_turns_into_rolling_summary(self):
         """UT6: при превышении порога старые ходы заменяются summary:rolling."""
 
