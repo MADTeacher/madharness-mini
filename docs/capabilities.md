@@ -36,7 +36,7 @@
 | `read_file` | Читает UTF-8 фрагмент файла по строкам. |
 | `read_image` | При включённом vision input прикрепляет локальное изображение к следующему обращению к модели. |
 | `search_code` | Ищет буквальную подстроку в файлах проекта. |
-| `apply_patch` | Применяет точечные файловые правки. |
+| `apply_patch` | Применяет точечные файловые правки в формате Codex. При несовпадении hunks'а возвращает в observation актуальный фрагмент файла (`current_excerpt` с номерами строк), чтобы модель перестроила патч из реальных строк, а не падала в `write_file`. |
 | `write_file` | Полностью перезаписывает UTF-8 файл. |
 | `run_shell` | Запускает одну разрешённую команду в workspace или безопасном `cwd`. По умолчанию исполняется через `/bin/sh -c`, поэтому операторы `&& ; \|\|` и конструкции `\|`, `2>&1`, `>/dev/null` работают. Разрушительные команды (`rm -rf`, `sudo`, `curl`, ...) и редирект в файлы блокируются политикой в любом режиме. |
 | `run_shell_background` | Запускает и управляет фоновым процессом (`action: start \| status \| stop`) — HTTP/dev-сервер, watcher и т.п. Процессы хранятся в пуле provider'а и автоматически гаснут при завершении сессии. Та же политика, что у `run_shell`; лимит `max_background_processes`. |
@@ -44,6 +44,18 @@
 | `delegate_task` | Делегирует задачу Markdown-субагенту. |
 | `ask_user` | Доступен только разрешённым субагентам; завершает запуск вопросом пользователю. |
 | `mcp__...` | Инструменты, полученные от явно включённых stdio MCP-серверов. |
+
+### Self-healing `apply_patch`
+
+Когда update-hunk не ложится на файл (0 или >1 совпадений), `apply_patch` не ограничивается короткой подсказкой, а прикладывает к observation актуальный фрагмент файла:
+
+- `current_excerpt` — реальные строки файла с номерами в формате `read_file` (`12: text`), окно вокруг точки наилучшего частичного совпадения;
+- `expected_lines` — что модель искала в hunk;
+- `match_count` — сколько точных совпадений найдено (0 или больше одного).
+
+Модель перестраивает hunk из `current_excerpt` и повторяет `apply_patch`, не отходя в `write_file`. Так разрывается компенсаторный цикл «stale context → patch fail → полная перезапись», который раздувает окно ассистентской историей и сводит на нет точечные правки. Excerpt жёстко ограничен (`clipped`, ≈4000 символов), а контекстный слой при необходимости дополнительно обрезает tool-observation обычным `clip_tool_content`.
+
+После нескольких неудач по одному пути (порог `PATCH_RETRY_HINT_THRESHOLD = 2`) в observation добавляется `retry_hint`, который направляет модель обратно к перечитыванию и перестройке `apply_patch`, а не к `write_file`.
 
 ## Настройки
 
@@ -69,7 +81,8 @@
 `context_reserve_tokens`, `context_contract_protection_turns`,
 `context_contract_protection_writes`, `context_workspace_map`,
 `context_workspace_map_depth`, `context_workspace_map_max_entries`,
-`context_shell_full_output`, `orchestration_mode`, `subagent_max_turns`,
+`context_read_default_lines`, `context_shell_full_output`,
+`orchestration_mode`, `subagent_max_turns`,
 `subagent_context_max_tokens`, `workspace_root`, `protected_paths`,
 `allow_shell`, `allow_shell_interpreter`, `max_background_processes`,
 `supports_image_input`, `max_image_bytes`, `image_detail`.
@@ -89,6 +102,7 @@
 | `context_workspace_map` | `true` | Подмешивать карту проекта (дерево каталогов) в начале сессии. |
 | `context_workspace_map_depth` | `3` | Максимальная глубина дерева в карте проекта. |
 | `context_workspace_map_max_entries` | `200` | Максимальное число записей в карте проекта. |
+| `context_read_default_lines` | `160` | Сколько строк `read_file` возвращает по умолчанию, если модель не указала `end`. Меньше — короче чтения и легче окно; больше — реже приходится дочитывать. Полезно уменьшать на длинных файлах/сессиях, где каждое чтение забивает рабочий слой. |
 | `context_shell_full_output` | `true` | При обрезке вывода `run_shell` сохранять полный `stdout`/`stderr` во временный файл `.madharness-mini/tool_outputs/`, а модели отдавать хвост (там обычно ошибки/итог) и путь для перечитывания через `read_file`. `false` возвращает прежнее поведение (голова через `clipped`, полный вывод теряется). |
 
 Ключевые механизмы:

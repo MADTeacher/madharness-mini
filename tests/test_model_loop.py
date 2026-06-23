@@ -435,6 +435,24 @@ class ModelLoopTests(HarnessTestCase):
         self.assertEqual(failed, {})
         self.assertNotIn("retry_hint", obs)
 
+    def test_apply_patch_retry_hint_directs_back_to_apply_patch_not_write_file(self):
+        """После порога неудач retry_hint ведёт в apply_patch, а не в write_file.
+
+        Прежний текст советовал write_file — это провоцировало fallback на полную
+        перезапись. Теперь hint должен направлять модель обратно к точечной правке.
+        """
+
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        failed = {}
+        obs = {"ok": False, "tool": "apply_patch", "summary": "expected 1 hunk match, found 0"}
+        # Доводим до порога: первый fail (count=1), второй fail (count=2 → hint).
+        _maybe_apply_patch_retry_hint("apply_patch", {"patch": patch}, obs, failed)
+        _maybe_apply_patch_retry_hint("apply_patch", {"patch": patch}, obs, failed)
+
+        self.assertIn("retry_hint", obs)
+        self.assertNotIn("write_file", obs["retry_hint"])
+        self.assertIn("current_excerpt", obs["retry_hint"])
+
     def test_loop_recovers_from_malformed_arguments_with_repair_hint(self):
         """Битый arguments (обрезанная генерация) не валит сессию HTTP 400.
 

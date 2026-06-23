@@ -29,6 +29,21 @@ class ToolTests(HarnessTestCase):
         self.assertTrue(obs["ok"])
         self.assertIn("1: one", obs["content"])
 
+    def test_read_file_respects_context_read_default_lines(self):
+        # Дефолт размера чтения вынесен в config (context_read_default_lines):
+        # без явного end read_file должен вернуть ровно столько строк.
+        cfg = self.make_cfg()
+        cfg.data["context_read_default_lines"] = 2
+        lines = "\n".join(f"line{i}" for i in range(10)) + "\n"
+        (cfg.root / "long.txt").write_text(lines, encoding="utf-8")
+        obs = ToolRegistry(cfg).call("read_file", {"path": "long.txt"})
+        self.assertTrue(obs["ok"])
+        # end = start(1) + default_lines(2) = 3, читаем строки 1..3.
+        self.assertEqual(obs["end"], 3)
+        self.assertIn("1: line0", obs["content"])
+        self.assertIn("3: line2", obs["content"])
+        self.assertNotIn("4: line3", obs["content"])
+
     def test_read_image_tool_returns_metadata_without_base64(self):
         cfg = self.make_cfg()
         (cfg.root / "shot.png").write_bytes(PNG_BYTES)
@@ -122,14 +137,16 @@ class ToolTests(HarnessTestCase):
     def test_apply_patch_is_registered(self):
         schemas = ToolRegistry(self.make_cfg()).schemas()
         names = [item["function"]["name"] for item in schemas]
+        # apply_patch идёт раньше write_file: точечная правка должна быть дефолтным
+        # выбором модели для существующих файлов, особенно у flash-моделей.
         self.assertEqual(
             names,
             [
                 "list_files",
                 "read_file",
                 "read_image",
-                "write_file",
                 "apply_patch",
+                "write_file",
                 "search_code",
                 "run_shell",
                 "run_shell_background",
@@ -196,6 +213,12 @@ class ToolTests(HarnessTestCase):
         self.assertIn("+added line begins with plus", combined)
         self.assertIn("reread the current file region", combined)
         self.assertIn("retry apply_patch", combined)
+        # Приоритет над write_file: модель должна знать, что патч дешевле перезаписи.
+        self.assertIn("Prefer apply_patch over write_file", combined)
+        # Таблица частых ошибок парсера — модель восстанавливается без write_file.
+        self.assertIn("expected 1 hunk match, found 0", combined)
+        self.assertIn("found 2", combined)
+        self.assertIn("verbatim", combined)
 
     def test_list_files_schema_describes_scope_and_limits(self):
         combined = self.tool_schema_text("list_files")
@@ -233,6 +256,10 @@ class ToolTests(HarnessTestCase):
         self.assertIn("Prefer apply_patch", combined)
         self.assertIn("Do not use write_file as", combined)
         self.assertIn("failed precise edit", combined)
+        # Усиленный запрет: write_file только для новых файлов или осознанной
+        # перезаписи; для правок существующих файлов — apply_patch.
+        self.assertIn("ONLY", combined)
+        self.assertIn("bloats", combined)
 
     def test_search_code_schema_describes_literal_search(self):
         combined = self.tool_schema_text("search_code")
@@ -539,7 +566,10 @@ class ToolTests(HarnessTestCase):
         self.assertFalse(obs["ok"])
         self.assertIn("expected 1 hunk match, found 2", obs["summary"])
         self.assertTrue(obs["retryable"])
-        self.assertIn("Add more surrounding context", obs["hint"])
+        self.assertIn("more than one place", obs["hint"])
+        self.assertIn("current_excerpt", obs)
+        self.assertIn("current file region", obs["hint"])
+        self.assertEqual(obs["match_count"], 2)
         self.assertEqual(path.read_text(encoding="utf-8"), "same\nold\nsame\nold\n")
 
     def test_apply_patch_fails_on_missing_context_without_writing(self):
@@ -566,9 +596,97 @@ class ToolTests(HarnessTestCase):
         self.assertFalse(obs["ok"])
         self.assertIn("expected 1 hunk match, found 0", obs["summary"])
         self.assertTrue(obs["retryable"])
-        self.assertIn("reread the exact region", obs["hint"])
-        self.assertIn("verbatim current context", obs["hint"])
+        self.assertIn("current file region", obs["hint"])
+        self.assertIn("current_excerpt", obs)
+        self.assertEqual(obs["match_count"], 0)
+        # Self-healing: модель получает актуальные строки файла с номерами.
+        self.assertIn("1: one", obs["current_excerpt"])
+        self.assertIn("2: two", obs["current_excerpt"])
         self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    def test_apply_patch_mismatch_excerpt_anchors_near_partial_overlap(self):
+        # Файл расходится с памятью модели в одной строке: best_partial_match
+        # должен привести excerpt в район реальной строки, а не в начало файла.
+        cfg = self.make_cfg()
+        path = cfg.root / "hello.txt"
+        path.write_text(
+            "header\nimport a\nimport b\nimport c\nTHE_REAL_LINE\nfooter\n",
+            encoding="utf-8",
+        )
+
+        obs = ToolRegistry(cfg).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: hello.txt",
+                        "@@",
+                        " import a",
+                        "-THE_STALE_LINE",
+                        "+THE_NEW_LINE",
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(obs["ok"])
+        self.assertEqual(obs["match_count"], 0)
+        # Якорь — частичное совпадение по «import a», excerpt показывает район
+        # вокруг строки 2, где реально начинается перекрытие.
+        self.assertIn("THE_REAL_LINE", obs["current_excerpt"])
+        self.assertIn("2: import a", obs["current_excerpt"])
+        self.assertEqual(
+            path.read_text(encoding="utf-8"),
+            "header\nimport a\nimport b\nimport c\nTHE_REAL_LINE\nfooter\n",
+        )
+
+    def test_apply_patch_mismatch_excerpt_is_clipped_for_large_file(self):
+        cfg = self.make_cfg()
+        path = cfg.root / "big.txt"
+        # Окно excerpt'а — ~11 строк с номерами (anchor у начала файла);
+        # чтобы превысить лимит в 4000 символов и потратить clipped(), делаем
+        # строки заведомо длинными.
+        chunk = "x" * 500
+        path.write_text(
+            "\n".join(f"line {n} {chunk}" for n in range(50)),
+            encoding="utf-8",
+        )
+
+        obs = ToolRegistry(cfg).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: big.txt",
+                        "@@",
+                        "-missing line",
+                        "+present line",
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(obs["ok"])
+        self.assertEqual(obs["match_count"], 0)
+        # clipped() оставляет маркер обрезки, чтобы модель знала, что видит
+        # только окно, а не весь файл.
+        self.assertIn("[clipped", obs["current_excerpt"])
+
+    def test_apply_patch_missing_patch_argument_explains_instead_of_keyerror(self):
+        # Раньше args без ключа patch ронял handler сырым KeyError; теперь модель
+        # получает понятное сообщение и retryable=True.
+        cfg = self.make_cfg()
+
+        obs = ToolRegistry(cfg).call("apply_patch", {})
+
+        self.assertFalse(obs["ok"])
+        self.assertIn("missing required argument: patch", obs["summary"])
+        self.assertTrue(obs["retryable"])
+        self.assertIn("patch", obs["hint"])
 
     def test_apply_patch_format_failure_explains_patch_boundaries(self):
         obs = ToolRegistry(self.make_cfg()).call(

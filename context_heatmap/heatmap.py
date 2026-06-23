@@ -66,10 +66,8 @@ LEGEND_Y = 92
 MASS_Y = 130  # верх блока A
 MASS_H = 250
 SIGNALS_Y = MASS_Y + MASS_H + 38  # верх блока B
-SIGNALS_H = 180
-COLD_Y = SIGNALS_Y + SIGNALS_H + 32
-COLD_H = 26
-ACTION_Y = COLD_Y + COLD_H + 18
+SIGNALS_H = 200
+ACTION_Y = SIGNALS_Y + SIGNALS_H + 32
 ACTION_H = 26
 AXIS_Y = ACTION_Y + ACTION_H + 22
 
@@ -85,8 +83,9 @@ def render_heatmap_png(data: dict[str, Any], out_path: Path) -> None:
     _draw_verdict(canvas, data)
     _draw_legend(canvas, data)
     _draw_mass_block(canvas, columns)
-    _draw_signals_block(canvas, columns, data)
-    _draw_cold_markers(canvas, data, turn_to_x)
+    # Дорожка COLD блока B несёт и heatmap-интенсивность, и ромбы-маркеры
+    # срабатывания правила cold gap — это один сигнал, не два.
+    _draw_signals_block(canvas, columns, data, turn_to_x)
     _draw_action_track(canvas, data, turn_to_x)
     # Швы рисуем последними — поверх всех блоков, чтобы они читались на любой высоте.
     _draw_seams(canvas, data, turn_to_x)
@@ -290,8 +289,14 @@ def _draw_signals_block(
     canvas: _Canvas,
     columns: list[dict[str, Any]],
     data: dict[str, Any],
+    turn_to_x: dict[int, int],
 ) -> None:
-    """Блок B — heatmap сигналов качества. Цвет = интенсивность × фирменный цвет дорожки."""
+    """Блок B — heatmap сигналов качества. Цвет = интенсивность × фирменный цвет дорожки.
+
+    На дорожке COLD дополнительно рисуем ромбы ◆ в ходах, где правило cold gap
+    сработало (findings): heatmap показывает *величину* сигнала, ромбы — *момент
+    срабатывания правила*. Это один сигнал, поэтому живёт в одной строке.
+    """
 
     canvas.text(LEFT, SIGNALS_Y - 18, "QUALITY SIGNALS  INTENSITY = SCORE", TEXT, scale=1)
     canvas.rect(LEFT, SIGNALS_Y, GRAPH_W, SIGNALS_H, PANEL)
@@ -300,6 +305,7 @@ def _draw_signals_block(
     signals = ("cold_gap_score", "window_pressure_score", "red_token_share", "fill_share")
     row_h = SIGNALS_H // len(signals)
     thresholds = data.get("thresholds") or {}
+    cold_turns = set(_safe_int(t) for t in (data.get("cold_turns") or []))
 
     for row, key in enumerate(signals):
         row_y = SIGNALS_Y + row * row_h
@@ -331,22 +337,13 @@ def _draw_signals_block(
                 _intensity(base_color, value),
             )
 
-
-def _draw_cold_markers(
-    canvas: _Canvas,
-    data: dict[str, Any],
-    turn_to_x: dict[int, int],
-) -> None:
-    """Узкая дорожка ◆ в ходах, где сработал cold gap."""
-
-    canvas.text(40, COLD_Y + COLD_H // 2 - 3, "COLD", COLD, scale=1)
-    canvas.rect(LEFT, COLD_Y, GRAPH_W, COLD_H, PANEL)
-    canvas.rect_outline(LEFT, COLD_Y, GRAPH_W, COLD_H, (200, 204, 210))
-    for turn_id in data.get("cold_turns") or []:
-        x = turn_to_x.get(_safe_int(turn_id))
-        if x is None:
-            continue
-        _draw_diamond(canvas, x, COLD_Y + COLD_H // 2, 4, COLD)
+        # На дорожке COLD — ромбы срабатывания правила поверх heatmap.
+        if key == "cold_gap_score":
+            for turn_id in cold_turns:
+                x = turn_to_x.get(turn_id)
+                if x is None:
+                    continue
+                _draw_diamond(canvas, x, row_y + row_h // 2, 5, COLD)
 
 
 def _draw_action_track(

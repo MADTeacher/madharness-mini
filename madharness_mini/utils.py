@@ -49,6 +49,10 @@ DEFAULT_CONFIG = {
     "context_workspace_map": True,
     "context_workspace_map_depth": 3,
     "context_workspace_map_max_entries": 200,
+    # Сколько строк read_file возвращает по умолчанию, если модель не указала end.
+    # Меньше — короче чтения и легче окно; больше — реже приходится дочитывать.
+    # 160 сохраняет прежнее поведение, при длинных файлах/сессиях стоит уменьшить.
+    "context_read_default_lines": 160,
     "orchestration_mode": "auto",
     "subagent_max_turns": 10,
     "subagent_context_max_tokens": 30000,

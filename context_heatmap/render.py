@@ -179,8 +179,8 @@ def _render(payload: dict) -> str:
     .anatomy-mass .anatomy-cell {{ background: #fff; overflow: hidden; }}
     .anatomy-mass .anatomy-cell .seg {{ position: absolute; left: 0; right: 0; }}
     .anatomy-threshold {{ position: absolute; left: 0; right: 0; border-top: 1px dashed #b26a00; pointer-events: none; }}
-    .anatomy-cold {{ height: 34px; align-items: center; }}
-    .anatomy-cold .marker {{ width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; transform: rotate(45deg); background: #1558d6; margin: 0 auto; cursor: pointer; }}
+    .anatomy-cold-diamond {{ position: absolute; top: 50%; width: 10px; height: 10px; transform: translate(-50%, -50%) rotate(45deg); background: #1558d6; cursor: pointer; z-index: 3; }}
+    .anatomy-cold-diamond:hover {{ outline: 2px solid #174ea6; }}
     .anatomy-action {{ height: 34px; align-items: center; }}
     .anatomy-action .act {{ width: 6px; height: 20px; margin: 0 1px; border-radius: 2px; cursor: pointer; display: inline-block; }}
     .anatomy-action .act:hover, .anatomy-action .act.linked {{ outline: 2px solid #174ea6; }}
@@ -442,11 +442,12 @@ def _anatomy_panel(data: dict) -> str:
 
     toolbar = _anatomy_toolbar(verdict, metrics)
     mass_row = _anatomy_mass_row(columns, source_types)
-    cold_row = _anatomy_signal_row(columns, "cold_gap_score", "#1558d6", thresholds, cold_only=True)
+    # Дорожка COLD несёт и heatmap-интенсивность, и ромбы-маркеры срабатывания
+    # правила cold gap — это один сигнал, не два.
+    cold_row = _anatomy_signal_row(columns, "cold_gap_score", "#1558d6", thresholds, cold_turns=cold_turns)
     press_row = _anatomy_signal_row(columns, "window_pressure_score", "#b26a00", thresholds)
     red_row = _anatomy_signal_row(columns, "red_token_share", "#be261e", thresholds)
     fill_row = _anatomy_signal_row(columns, "fill_share", "#5a6473", thresholds, fill=True)
-    cold_marker_row = _anatomy_cold_marker_row(columns, cold_turns)
     action_row = _anatomy_action_row(columns, actions_by_turn, name_to_group)
     axis = _anatomy_axis(columns)
     seams_layer = _anatomy_seams_layer(columns, seams)
@@ -466,8 +467,6 @@ def _anatomy_panel(data: dict) -> str:
         f'<div class="anatomy-track">{red_row}</div></div>'
         '<div class="anatomy-row"><div class="anatomy-label">WINDOW FILL</div>'
         f'<div class="anatomy-track">{fill_row}</div></div>'
-        '<div class="anatomy-row"><div class="anatomy-label">COLD MARKER</div>'
-        f'<div class="anatomy-track anatomy-cold">{cold_marker_row}</div></div>'
         '<div class="anatomy-row"><div class="anatomy-label">ACTION</div>'
         f'<div class="anatomy-track anatomy-action">{action_row}</div></div>'
         "</div>"
@@ -566,8 +565,14 @@ def _anatomy_signal_row(
     *,
     cold_only: bool = False,
     fill: bool = False,
+    cold_turns: set[int] | None = None,
 ) -> str:
-    """Дорожка сигнала блока B: ячейка красится по интенсивности значения."""
+    """Дорожка сигнала блока B: ячейка красится по интенсивности значения.
+
+    На дорожке COLD (cold_turns задан) поверх heatmap рисуем ромбы ◆ в ходах,
+    где правило cold gap сработало: heatmap показывает величину сигнала, ромбы —
+    момент срабатывания правила. Это один сигнал, поэтому живёт в одной строке.
+    """
 
     cells = []
     for column in columns:
@@ -586,6 +591,19 @@ def _anatomy_signal_row(
         )
         cells.append(cell)
     inner = "".join(cells)
+    if cold_turns:
+        # Ромбы срабатывания правила cold gap поверх heatmap-интенсивности.
+        total = max(len(columns), 1)
+        for index, column in enumerate(columns):
+            turn_id = _safe_int(column.get("turn_id"))
+            if turn_id not in cold_turns:
+                continue
+            left_pct = 100.0 * index / total
+            inner += (
+                f'<span class="anatomy-cold-diamond" data-turn="{turn_id}" data-cold="1" '
+                f'title="cold gap at turn {turn_id}" '
+                f'style="left:calc({left_pct:.3f}% + 2px)"></span>'
+            )
     if fill:
         # Пороговые линии 0.75 / 0.90 — калибровка глаз для заполненности окна.
         for ratio, label, border in (
@@ -598,21 +616,6 @@ def _anatomy_signal_row(
                 f'title="{label} {ratio}"></span>'
             )
     return inner
-
-
-def _anatomy_cold_marker_row(columns: list[dict], cold_turns: set[int]) -> str:
-    """Узкая дорожка ромбов-маркеров в ходах cold gap."""
-
-    cells = []
-    for column in columns:
-        turn_id = _safe_int(column.get("turn_id"))
-        if turn_id in cold_turns:
-            cells.append(
-                f'<span class="marker" data-turn="{turn_id}" data-cold="1" '
-                f'title="cold gap at turn {turn_id}"></span>'
-            )
-        cells.append('<span style="flex:1 1 0;min-width:2px"></span>')
-    return "".join(cells)
 
 
 def _anatomy_action_row(

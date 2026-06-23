@@ -481,6 +481,26 @@ class ContextManagerTests(HarnessTestCase):
 
         self.assertNotIn("Напоминание о файловом состоянии", rendered)
 
+    def test_file_state_reminder_writes_text_excerpt_into_packet(self):
+        # Текст напоминания должен попадать в context_packet как text_excerpt в
+        # metadata unit'а reminder: иначе аналитик трассы не видит, что harness
+        # говорил модели о «грязных» файлах. См. telemetry.build_context_packet.
+        ctx = ContextManager("task", max_tokens=20000)
+        self._record_file_ref(ctx, "c1", FileRef("server.js", "write"))
+
+        ctx.messages()
+        units = ctx.report()["context_packet"]["units"]
+        reminder = next(
+            unit
+            for unit in units
+            if unit.get("source_ref") == "file-state:reminder"
+        )
+
+        excerpt = reminder["metadata"].get("text_excerpt", "")
+        # В вырезке виден заголовок напоминания и путь «грязного» файла.
+        self.assertIn("Напоминание", excerpt)
+        self.assertIn("server.js", excerpt)
+
     def test_record_tool_result_without_file_refs_is_backward_compatible(self):
         ctx = ContextManager("task", max_tokens=20000)
         call = tool_call("call_legacy", "demo")
@@ -559,6 +579,10 @@ class ContextManagerTests(HarnessTestCase):
     def test_default_config_enables_age_summarization(self):
         """UT3: возрастная компактизация включена по умолчанию в конфиге harness."""
         self.assertEqual(DEFAULT_CONFIG["context_summarize_after_turns"], 3)
+
+    def test_default_config_read_default_lines_is_160(self):
+        """Дефолт размера чтения read_file сохраняет прежнее поведение (160 строк)."""
+        self.assertEqual(DEFAULT_CONFIG["context_read_default_lines"], 160)
 
     def test_summarize_after_turns_off_by_default(self):
         """Без параметра старые entries остаются нетронутыми."""

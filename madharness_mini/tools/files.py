@@ -46,7 +46,10 @@ def read_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             ctx.trace.write("skill_resource_used", tool="read_file", **event)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     start = max(int(args.get("start", 1)), 1)
-    end = min(int(args.get("end", start + 160)), len(lines))
+    # Дефолт размера чтения вынесен в config (context_read_default_lines), чтобы
+    # можно было уменьшить чтения без правки кода — короткие чтения легче для окна.
+    default_lines = int(ctx.cfg.data.get("context_read_default_lines", 160)) or 160
+    end = min(int(args.get("end", start + default_lines)), len(lines))
     excerpt = "\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1))
     return ok(
         "read_file",
@@ -88,6 +91,10 @@ refer to the exact surrounding text.
 WRITE_FILE_DESCRIPTION = """Write a complete UTF-8 text file inside the workspace.
 
 This creates parent directories as needed and fully overwrites the target file.
+Use write_file ONLY for creating a new file or for a deliberate full rewrite when
+the change touches most of the file. For any smaller change to an existing file,
+use apply_patch instead: rewriting the whole file wastes tokens and bloats the
+context window, because the full new content is then carried in every later turn.
 Prefer apply_patch for precise edits to existing files. Do not use write_file as
 the fallback for a failed precise edit unless you intentionally need a full-file
 rewrite.
@@ -125,7 +132,11 @@ READ_FILE_SPEC = ToolSpec(
             "end": {
                 "type": "integer",
                 "default": 160,
-                "description": "1-based last line number to include; defaults to start + 160.",
+                "description": (
+                    "1-based last line number to include; defaults to start + N, "
+                    "where N is the harness context_read_default_lines setting "
+                    "(160 unless configured otherwise)."
+                ),
             },
         },
         ["path"],

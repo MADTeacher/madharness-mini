@@ -22,8 +22,10 @@ RATE_LIMIT_RETRY_MAX_SECONDS = 60
 TRANSIENT_RETRY_DELAYS_SECONDS = (1, 3)
 
 # После стольких неудачных apply_patch по одному пути подсказываем модели, что
-# её память о файле рассинхронизирована, и стоит перечитать файл или сделать
-# write_file целиком. Прерывает дорогой цикл read → apply_patch(fail) → repeat.
+# её память о файле рассинхронизирована, и стоит перестроить hunks из актуальных
+# строк. observation.apply_patch уже прикладывает current_excerpt при несовпадении,
+# поэтому направляем модель обратно в apply_patch, а не в write_file — полная
+# перезапись раздувает окно и сводит на нет точечную правку.
 PATCH_RETRY_HINT_THRESHOLD = 2
 
 
@@ -441,8 +443,9 @@ def _maybe_apply_patch_retry_hint(
 
     После PATCH_RETRY_HINT_THRESHOLD неудач по одному пути добавляем в observation
     поле retry_hint: модель видит, что её память о файле рассинхронизирована, и
-    быстрее переходит к read_file или write_file целиком. Успешная правка путь
-    сбрасывает счётчик. Мутирует observation in-place до записи в trace/историю.
+    перестраивает hunks из current_excerpt, который apply_patch уже приложил к
+    неуспешному observation. Успешная правка путь сбрасывает счётчик. Мутирует
+    observation in-place до записи в trace/историю.
     """
 
     if tool_name != "apply_patch":
@@ -464,8 +467,10 @@ def _maybe_apply_patch_retry_hint(
         if count >= PATCH_RETRY_HINT_THRESHOLD:
             observation["retry_hint"] = (
                 f"apply_patch failed {count} times for {path}; the file likely "
-                "differs from your memory. Use read_file for the current state "
-                "or write_file for the full content."
+                "differs from your memory. Use read_file for the current state, "
+                "then rebuild apply_patch with the exact lines. The failed "
+                "observation already includes the current file region as "
+                "current_excerpt — copy from it."
             )
 
 

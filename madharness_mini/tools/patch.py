@@ -3,9 +3,19 @@
 from pathlib import Path
 from typing import Any
 
-from ..utils import fail, obj, ok, strp
+from ..utils import clipped, fail, obj, ok, strp
 from .context import ToolContext
 from .specs import ToolSpec
+
+# Сколько символов актуального файла отдавать модели при несовпадении hunks'а.
+# Окно достаточно, чтобы покрыть типичную правку с контекстом, но не раздувает
+# observation на больших файлах: дальше контекстный слой всё равно обрежет
+# tool-сообщение через clip_tool_content.
+MISMATCH_EXCERPT_LIMIT = 4000
+
+# Полуширина окна строк вокруг точки несовпадения: показываем ~10 строк до и
+# после, чтобы модель увидела достаточный контекст для rebuilding hunks'а.
+MISMATCH_EXCERPT_WINDOW = 10
 
 
 def patch_failure_data(summary: str) -> dict[str, Any]:
@@ -19,18 +29,20 @@ def patch_failure_data(summary: str) -> dict[str, Any]:
     if summary == "expected 1 hunk match, found 0":
         return {
             "hint": (
-                "The update hunk did not match the current file. Use read_file or "
-                "search_code to reread the exact region, then retry apply_patch with "
-                "verbatim current context lines, including spaces."
+                "The update hunk did not match the current file. The current file "
+                "region is attached as current_excerpt — copy the exact lines from "
+                "it (with their surrounding context) and rebuild the hunk, then "
+                "retry apply_patch. Do not fall back to write_file."
             ),
             "retryable": True,
         }
     if summary.startswith("expected 1 hunk match, found "):
         return {
             "hint": (
-                "The update hunk matched more than one place. Add more surrounding "
-                "context lines copied exactly from the current file, then retry "
-                "apply_patch."
+                "The update hunk matched more than one place. The current file "
+                "region is attached as current_excerpt — add more surrounding "
+                "context lines copied from it to make the match unique, then "
+                "retry apply_patch. Do not fall back to write_file."
             ),
             "retryable": True,
         }
@@ -72,9 +84,34 @@ def patch_failure_data(summary: str) -> dict[str, Any]:
 def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """Применяем текстовый patch в формате Codex (add/update/delete)."""
 
+    # Защищаемся от невалидного вызова без тела patch: иначе args["patch"]
+    # ронял handler сырым KeyError, и модель получала техническое сообщение
+    # вместо подсказки повторить с корректным аргументом.
+    patch = args.get("patch")
+    if not isinstance(patch, str) or not patch.strip():
+        return fail(
+            "apply_patch",
+            "missing required argument: patch",
+            hint=(
+                "Send the patch text in the `patch` argument as one string, "
+                "starting with *** Begin Patch and ending with *** End Patch."
+            ),
+            retryable=True,
+        )
     parser = PatchParser(ctx)
     try:
-        changes = parser.prepare(args["patch"])
+        changes = parser.prepare(patch)
+    except PatchHunkMismatch as exc:
+        # Self-healing: возвращаем модели актуальный фрагмент файла, чтобы она
+        # перестроила hunks из реальных строк, а не падала в write_file.
+        return fail(
+            "apply_patch",
+            str(exc),
+            **patch_failure_data(str(exc)),
+            current_excerpt=exc.current_excerpt,
+            expected_lines=exc.expected_lines,
+            match_count=exc.match_count,
+        )
     except ValueError as exc:
         summary = str(exc)
         return fail("apply_patch", summary, **patch_failure_data(summary))
@@ -85,6 +122,78 @@ def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
     return ok("apply_patch", f"applied patch to {len(changes)} file(s)")
+
+
+class PatchHunkMismatch(ValueError):
+    """Несовпадение hunks'а: несем модели актуальный фрагмент файла.
+
+    PatchParser поднимает его вместо обычного ValueError, когда update-hunk не
+    лёг на файл (0 или >1 совпадений). observation.apply_patch отдаёт модели
+    current_excerpt — реальные строки файла с номерами, чтобы следующий patch
+    опирался на актуальный текст, а не на устаревшую память о файле.
+    """
+
+    def __init__(
+        self,
+        summary: str,
+        *,
+        path: Path,
+        expected_lines: list[str],
+        current_excerpt: str,
+        match_count: int,
+    ):
+        super().__init__(summary)
+        self.path = path
+        self.expected_lines = expected_lines
+        self.current_excerpt = current_excerpt
+        self.match_count = match_count
+
+
+def _build_mismatch_excerpt(
+    current: list[str],
+    anchor: int,
+    expected_lines: list[str],
+) -> str:
+    """Собираем окно строк файла вокруг точки несовпадения с номерами.
+
+    anchor — индекс строки (0-based), вокруг которой показываем контекст:
+    позицию наилучшего частичного совпадения или первого точного match'а.
+    Формат строк повторяет read_file («12: text»), чтобы модель могла сразу
+    использовать те же строки в rebuilding hunks'а. Длинный excerpt обрезаем
+    через clipped(), иначе большой файл раздул бы observation.
+    """
+
+    start = max(0, anchor - MISMATCH_EXCERPT_WINDOW)
+    end = min(len(current), anchor + len(expected_lines) + MISMATCH_EXCERPT_WINDOW)
+    lines = [f"{i + 1}: {current[i]}" for i in range(start, end)]
+    return clipped("\n".join(lines), limit=MISMATCH_EXCERPT_LIMIT)
+
+
+def _best_partial_match(
+    current: list[str], old_lines: list[str]
+) -> int:
+    """Индекс строки файла с максимальным перекрытием по old_lines.
+
+    Когда точного совпадения нет (found 0), показываем модели район файла,
+    где её ожидаемые строки пересекаются с реальностью сильнее всего. Считаем
+    для каждой стартовой позиции число совпавших строк из old_lines и берём
+    максимум — простой и понятный для учебного harnessа эвристический якорь.
+    """
+
+    if not current or not old_lines:
+        return 0
+    best_index = 0
+    best_score = -1
+    for start in range(len(current)):
+        score = 0
+        for offset, expected in enumerate(old_lines):
+            pos = start + offset
+            if pos < len(current) and current[pos] == expected:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_index = start
+    return best_index
 
 
 class PatchParser:
@@ -206,7 +315,25 @@ class PatchParser:
                 i += 1
             if not old_lines and not new_lines:
                 raise ValueError("empty update hunk")
-            current = self._apply_hunk(current, old_lines, new_lines)
+            if not old_lines:
+                raise ValueError("update hunk must include context or removed lines")
+            matches = self._find_hunk_matches(current, old_lines)
+            if len(matches) != 1:
+                # Self-healing: несём модели актуальный фрагмент файла вокруг
+                # точки несовпадения, чтобы она перестроила hunks из реальных
+                # строк, а не падала в write_file.
+                anchor = matches[0] if matches else _best_partial_match(
+                    current, old_lines
+                )
+                excerpt = _build_mismatch_excerpt(current, anchor, old_lines)
+                raise PatchHunkMismatch(
+                    f"expected 1 hunk match, found {len(matches)}",
+                    path=path,
+                    expected_lines=old_lines,
+                    current_excerpt=excerpt,
+                    match_count=len(matches),
+                )
+            current = self._apply_matched_hunk(current, matches[0], old_lines, new_lines)
             saw_hunk = True
         if not saw_hunk and target_path is None:
             raise ValueError(f"update has no hunks: {raw}")
@@ -223,18 +350,26 @@ class PatchParser:
             changes[target_path] = updated
         return i
 
-    def _apply_hunk(
-        self, current: list[str], old_lines: list[str], new_lines: list[str]
-    ) -> list[str]:
+    def _find_hunk_matches(
+        self, current: list[str], old_lines: list[str]
+    ) -> list[int]:
+        """Стартовые индексы точных совпадений old_lines в текущем файле."""
+
         matches = []
-        if not old_lines:
-            raise ValueError("update hunk must include context or removed lines")
         for start in range(len(current) - len(old_lines) + 1):
             if current[start : start + len(old_lines)] == old_lines:
                 matches.append(start)
-        if len(matches) != 1:
-            raise ValueError(f"expected 1 hunk match, found {len(matches)}")
-        start = matches[0]
+        return matches
+
+    def _apply_matched_hunk(
+        self,
+        current: list[str],
+        start: int,
+        old_lines: list[str],
+        new_lines: list[str],
+    ) -> list[str]:
+        """Вырезаем старый блок и вставляем новый по известной позиции match'а."""
+
         end = start + len(old_lines)
         return current[:start] + new_lines + current[end:]
 
@@ -248,6 +383,32 @@ for each update hunk to match exactly one place.
 If apply_patch fails, use read_file or search_code to get exact current file text
 and retry with verbatim context. Do not switch to write_file or run_shell scripts
 for precise edits.
+
+Prefer apply_patch over write_file for ANY change to an existing file. A targeted
+patch is roughly 10x cheaper in tokens than rewriting the whole file, and it keeps
+the context window clean. write_file bloats the window with the full new file text,
+which accumulates across edits and crowds out evidence — prefer the small patch.
+
+Self-healing on mismatch: when an update hunk does not match the current file, the
+observation includes current_excerpt with the actual file region (with line numbers)
+and match_count. Rebuild the hunk from those exact lines and retry apply_patch. This
+is the primary recovery path — do not fall back to write_file just because the first
+patch did not match.
+
+Common parser errors and how to recover (the current file region is attached as
+current_excerpt for the first two cases — use it instead of re-reading):
+- "expected 1 hunk match, found 0": context or removed lines do not match the
+  current file verbatim. Copy surrounding lines from current_excerpt exactly,
+  preserving leading spaces, and retry.
+- "expected 1 hunk match, found 2": context matched more than one place. Add a few
+  more surrounding context lines copied from current_excerpt to make it unique.
+- "invalid hunk line:": a blank line in the hunk has no marker. Even blank context
+  lines must start with a single space.
+- "Move to is only supported after Update File": put "*** Move to:" on the line
+  immediately after "*** Update File:", before any @@ hunks.
+- "patch must start with *** Begin Patch" or "unexpected patch line": send only the
+  patch text. Do not wrap it in a shell command, Markdown fence, JSON object, or
+  extra prose.
 """
 
 PATCH_ARGUMENT_DESCRIPTION = """Strict Codex-style patch text.
@@ -278,7 +439,9 @@ Compact valid example:
 *** End Patch
 
 On failure: reread the current file region with read_file/search_code, copy exact
-current lines into the hunk, and retry apply_patch once.
+current lines into the hunk, and retry apply_patch once. Remember that blank
+context lines must still start with one space — a truly empty line is a parse
+error.
 """
 
 APPLY_PATCH_SPEC = ToolSpec(

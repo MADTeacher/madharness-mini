@@ -35,6 +35,15 @@ ATTACHED_HEADING_RE = re.compile(
     r"документ|лог|вывод)\s*:?\s*$"
 )
 
+# Дубликат FILE_STATE_REMINDER_ID из manager.py. Константу держим локально, чтобы
+# не заводить циклический импорт telemetry -> manager (manager сам импортирует
+# build_context_packet отсюда). Значение должно совпадать с manager.FILE_STATE_REMINDER_ID.
+FILE_STATE_REMINDER_ID = "file-state:reminder"
+# Сколько символов текста напоминания сохраняем в trace: достаточно, чтобы увидеть
+# категории и пути, но не раздуть трассу. Текст reminder не содержит содержимого
+# файлов, только пути и стандартные формулировки, поэтому вырезка безопасна.
+FILE_STATE_REMINDER_EXCERPT_CHARS = 300
+
 
 def build_context_packet(
     user_task: str,
@@ -50,6 +59,18 @@ def build_context_packet(
     cursor = 0
 
     for fragment in fragments:
+        metadata = {
+            "placement": fragment.placement,
+            "priority": fragment.priority,
+            "transient": fragment.transient,
+            "chars": len(fragment.text),
+        }
+        # Для file-state reminder сохраняем краткую выдержку текста в trace:
+        # без неё аналитик не видит, что именно harness говорил модели о «грязных»
+        # файлах, и не может отличить «reminder промолчал» от «модель его Ignore».
+        # Контент файлов reminder не несёт — только пути и стандартные формулировки.
+        if fragment.id == FILE_STATE_REMINDER_ID:
+            metadata["text_excerpt"] = fragment.text[:FILE_STATE_REMINDER_EXCERPT_CHARS]
         cursor = _append_context_unit(
             units,
             cursor,
@@ -59,12 +80,7 @@ def build_context_packet(
             source_ref=fragment.id,
             payload=fragment.text,
             included_because=f"{fragment.placement}_fragment",
-            metadata={
-                "placement": fragment.placement,
-                "priority": fragment.priority,
-                "transient": fragment.transient,
-                "chars": len(fragment.text),
-            },
+            metadata=metadata,
             classification=_classification_from_fragment(fragment),
             confidence=0.95,
         )
