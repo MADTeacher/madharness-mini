@@ -514,6 +514,62 @@ class ModelLoopTests(HarnessTestCase):
         )
         self.assertEqual(finished["model_response"]["finish_reason"], "stop")
 
+    def test_record_usage_called_after_model_call(self):
+        """Реальный usage из ответа модели калибрует оценку токенов контекста.
+
+        Запускаем агентский цикл из двух ходов: первый возвращает tool_call с
+        большим prompt_tokens в usage, второй — финальный ответ. Калибровка из
+        первого хода должна поднять token_ratio во втором (видно в context_report).
+        """
+
+        cfg = self.make_cfg()
+        call_count = {"n": 0}
+
+        def fake_chat(messages, tools=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "function": {
+                                            "name": "list_files",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1_000_000,
+                        "completion_tokens": 1,
+                        "total_tokens": 1_000_001,
+                    },
+                }
+            return {"choices": [{"message": {"content": "done"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+            result, trace_path = run_agent("do work", cfg)
+
+        self.assertEqual(result, "done")
+        events = [
+            json.loads(line)
+            for line in Path(trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        started_events = [
+            event for event in events if event.get("event") == "model_call_started"
+        ]
+        # Второй model_call должен увидеть откалиброванный ratio > 1.0: провайдер
+        # сообщил аномально много токенов относительно нашей эвристики.
+        self.assertGreaterEqual(len(started_events), 2)
+        second_ratio = started_events[1]["context_report"].get("token_ratio", 1.0)
+        self.assertGreater(second_ratio, 1.0)
+
     def test_loop_handles_real_truncated_arguments_from_flappy3_trace(self):
         """Регрессия на реальном кейсе: обрезанный write_file из flappy3.
 

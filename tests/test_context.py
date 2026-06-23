@@ -1364,6 +1364,317 @@ class ContextManagerTests(HarnessTestCase):
         ]
         self.assertLessEqual(len(tree_lines), max_entries)
 
+    def test_record_usage_calibrates_token_ratio(self):
+        """Получив реальный usage, менеджер сглаживает коэффициент к эвристике."""
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant({"role": "assistant", "content": "answer" * 200})
+        ctx.messages()
+        baseline = ctx._last_request_estimate
+        self.assertGreater(baseline, 0)
+        self.assertEqual(ctx._token_ratio, 1.0)
+
+        # Провайдер сообщил вдвое больше токенов, чем наша эвристика.
+        ctx.record_usage(baseline * 2)
+
+        # EMA с весом 0.5: ratio смещается к 2.0, но не достигает его за один шаг.
+        self.assertGreater(ctx._token_ratio, 1.0)
+        self.assertLess(ctx._token_ratio, 2.0)
+        self.assertIn("token_ratio", ctx.report())
+
+    def test_record_usage_ignores_none_and_zero(self):
+        """Без базы или с None/0 калибровка — no-op, состояние не меняется."""
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant({"role": "assistant", "content": "answer" * 50})
+        # До первого messages() базы _last_request_estimate нет — no-op.
+        ctx.record_usage(10000)
+        self.assertEqual(ctx._token_ratio, 1.0)
+        ctx.messages()
+        # None и 0 тоже не должны двигать ratio.
+        ctx.record_usage(None)
+        ctx.record_usage(0)
+        self.assertEqual(ctx._token_ratio, 1.0)
+
+    def test_record_usage_clamps_extreme_ratio(self):
+        """Разовый выброс провайдера не уводит ratio за границы [0.3, 3.0]."""
+        ctx = ContextManager("task", max_tokens=20000)
+        ctx.record_assistant({"role": "assistant", "content": "answer" * 50})
+        ctx.messages()
+        baseline = ctx._last_request_estimate
+        # Аномально большое: measured ограничивается 3.0, EMA тянет к 3.0 снизу.
+        ctx.record_usage(baseline * 1_000_000)
+        self.assertLessEqual(ctx._token_ratio, 3.0)
+        # Аномально малое: measured ограничивается 0.3, EMA тянет к 0.3 сверху.
+        ctx.record_usage(1)
+        self.assertGreaterEqual(ctx._token_ratio, 0.3)
+
+    def test_record_usage_tightens_budget_trigger(self):
+        """После калибровки вверх усечение срабатывает на меньшей истории."""
+        ctx = ContextManager("task", max_tokens=600)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        # История, которая без калибровки вписывается, но с ratio>1 — уже нет.
+        # Сырая оценка ~половина бюджета: умножение на ratio>1 переводит через край.
+        ctx.record_assistant({"role": "assistant", "content": "x" * 1300})
+        ctx.messages()
+        raw = ctx._last_request_estimate
+        self.assertGreater(raw, 0)
+        self.assertFalse(ctx.stats()["truncated"])
+
+        # Калибруем так, будто реальных токенов вдвое больше нашей оценки.
+        ctx._token_ratio = 2.0
+        ctx._last_stats = None
+        ctx._last_report = None
+        ctx.messages()
+
+        self.assertTrue(ctx.stats()["truncated"])
+
+    def test_reserve_tokens_triggers_drop_before_hard_limit(self):
+        """reserve_tokens снижает порог дропа: усечение срабатывает раньше жёсткого предела."""
+        # Без резерва: история ~900 токенов вписывается в max_tokens=1000.
+        ctx_no_reserve = ContextManager(
+            "task", max_tokens=1000, reserve_tokens=0, keep_recent_turns=0
+        )
+        ctx_no_reserve.add_fragment(ContextFragment("system", "test", "system"))
+        for index in range(3):
+            ctx_no_reserve.record_assistant(
+                {"role": "assistant", "content": f"turn {index} " + "y" * 900}
+            )
+        ctx_no_reserve.messages()
+        self.assertFalse(ctx_no_reserve.stats()["truncated"])
+
+        # С резервом 300: порог дропа становится 700, та же история уже превышает.
+        ctx_reserve = ContextManager(
+            "task", max_tokens=1000, reserve_tokens=300, keep_recent_turns=0
+        )
+        ctx_reserve.add_fragment(ContextFragment("system", "test", "system"))
+        for index in range(3):
+            ctx_reserve.record_assistant(
+                {"role": "assistant", "content": f"turn {index} " + "y" * 900}
+            )
+        ctx_reserve.messages()
+        report = ctx_reserve.report()
+        self.assertTrue(report["truncated"])
+        self.assertEqual(report["reserve_tokens"], 300)
+        # Итоговая оценка укладывается в проактивный порог (max - reserve).
+        self.assertLessEqual(
+            report["request_tokens_estimate"],
+            report["max_tokens"] - report["reserve_tokens"],
+        )
+        # Жёсткий предел при этом не пробит (hard_limit_exceeded=False).
+        self.assertFalse(report["hard_limit_exceeded"])
+
+    def test_reserve_tokens_zero_preserves_old_behavior(self):
+        """При reserve_tokens=0 порог совпадает с max_tokens (прежнее поведение)."""
+        ctx = ContextManager(
+            "task", max_tokens=500, reserve_tokens=0, keep_recent_turns=0
+        )
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        # История чуть меньше max_tokens: дропа нет.
+        ctx.record_assistant({"role": "assistant", "content": "x" * 1100})
+        ctx.messages()
+        self.assertFalse(ctx.stats()["truncated"])
+
+    def test_default_config_disables_reserve_tokens(self):
+        """По умолчанию проактивное сжатие выключено (backward-compatible)."""
+        self.assertEqual(DEFAULT_CONFIG["context_reserve_tokens"], 0)
+
+    def test_compacted_fragment_lists_read_and_modified_files(self):
+        """Фрагмент history:compacted показывает прочитанные и изменённые файлы свёрнутого диапазона."""
+        ctx = ContextManager("task", max_tokens=500, keep_recent_turns=1)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        # Ход 0: читаем spec.md (без последующей правки → только read).
+        read_call = tool_call("c_read", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [read_call]})
+        ctx.record_tool_result(
+            read_call,
+            {"ok": True, "tool": "read_file", "summary": "read spec.md", "content": "x" * 400},
+            file_refs=[FileRef("spec.md", "read")],
+        )
+        # Ход 1: пишем impl.py (только write → modified).
+        write_call = tool_call("c_write", "write_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [write_call]})
+        ctx.record_tool_result(
+            write_call,
+            {"ok": True, "tool": "write_file", "summary": "wrote impl.py"},
+            file_refs=[FileRef("impl.py", "write")],
+        )
+        # Ход 2: объёмное наблюдение, которое форсирует дроп ходов 0-1 по бюджету.
+        ctx.record_assistant({"role": "assistant", "content": "filler " + "x" * 2000})
+        # Ход 3: свежий короткий ход, защищённый keep_recent.
+        ctx.record_assistant({"role": "assistant", "content": "done"})
+
+        ctx.messages()  # дрон → копит skeleton
+        ctx.messages()  # публикует фрагмент
+        fragment = ctx._compacted_history_fragment()
+        self.assertIsNotNone(fragment)
+
+        self.assertIn("Прочитанные ранее файлы", fragment.text)
+        self.assertIn("spec.md", fragment.text)
+        self.assertIn("Изменённые ранее файлы", fragment.text)
+        self.assertIn("impl.py", fragment.text)
+
+    def test_compacted_fragment_excludes_files_from_kept_history(self):
+        """Файлы, затронутые только в удержанной (свежей) истории, не попадают в список свёрнутых."""
+        ctx = ContextManager("task", max_tokens=500, keep_recent_turns=1)
+        ctx.add_fragment(ContextFragment("system", "test", "system"))
+        # Свёрнутый ход: читаем old.md.
+        read_call = tool_call("c_old", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [read_call]})
+        ctx.record_tool_result(
+            read_call,
+            {"ok": True, "tool": "read_file", "summary": "read old.md", "content": "x" * 400},
+            file_refs=[FileRef("old.md", "read")],
+        )
+        # Объёмный ход для выталкивания ходом 0 в дроп.
+        ctx.record_assistant({"role": "assistant", "content": "filler " + "x" * 2000})
+        # Свежий удержанный ход: читаем fresh.md (не должен попасть в свёрнутый список).
+        fresh_call = tool_call("c_fresh", "read_file")
+        ctx.record_assistant({"role": "assistant", "content": None, "tool_calls": [fresh_call]})
+        ctx.record_tool_result(
+            fresh_call,
+            {"ok": True, "tool": "read_file", "summary": "read fresh.md", "content": "ok"},
+            file_refs=[FileRef("fresh.md", "read")],
+        )
+
+        ctx.messages()
+        ctx.messages()
+        fragment = ctx._compacted_history_fragment()
+        self.assertIsNotNone(fragment)
+
+        self.assertIn("old.md", fragment.text)
+        self.assertNotIn("fresh.md", fragment.text)
+
+    def test_emergency_truncation_drops_workspace_map_before_fatal(self):
+        """Emergency убирает эвиктируемые рабочие фрагменты, спасая сессию от fatal."""
+        ctx = ContextManager("task", max_tokens=800, keep_recent_turns=0)
+        # Системный промпт — короткий, survives emergency.
+        ctx.add_fragment(
+            ContextFragment(
+                id="system",
+                source="test",
+                text="core rules",
+                priority=0,
+                evictability="never",
+            )
+        )
+        # Большой рабочий фрагмент с evictability='normal' (как workspace-map):
+        # именно его emergency должен убрать первым.
+        ctx.add_fragment(
+            ContextFragment(
+                id="workspace-map",
+                source="test map",
+                text="map " + "m" * 4000,
+                priority=5,
+                evictability="normal",
+            )
+        )
+        # История, которая без emergency переполняет бюджет.
+        ctx.record_assistant({"role": "assistant", "content": "turn " + "x" * 2000})
+
+        messages = ctx.messages()
+        report = ctx.report()
+
+        # Сессия спасена: RuntimeError не поднят, emergency сработал.
+        self.assertIsNotNone(messages)
+        self.assertTrue(report["emergency_truncated"])
+        self.assertFalse(report["hard_limit_exceeded"])
+        self.assertIn("workspace-map", report["emergency_dropped_fragments"])
+        # Системный промпт survived.
+        self.assertIn("core rules", json.dumps(messages, ensure_ascii=False))
+        # Карта убрана из итогового запроса.
+        self.assertNotIn("m" * 100, json.dumps(messages, ensure_ascii=False))
+
+    def test_emergency_clips_project_instructions(self):
+        """Если удаления рабочих фрагментов мало, emergency клипает project-инструкции."""
+        ctx = ContextManager("task", max_tokens=600, keep_recent_turns=0)
+        ctx.add_fragment(
+            ContextFragment(
+                id="system",
+                source="test",
+                text="core rules here",
+                priority=0,
+                evictability="never",
+            )
+        )
+        # Большая project-инструкция: emergency клипнет её до половины.
+        ctx.add_fragment(
+            ContextFragment(
+                id="project-instructions",
+                source="AGENTS.md",
+                text="# Project\n" + "rule line\n" * 300,
+                priority=1,
+                evictability="only_after_validation",
+            )
+        )
+
+        messages = ctx.messages()
+        report = ctx.report()
+
+        self.assertTrue(report["emergency_truncated"])
+        self.assertFalse(report["hard_limit_exceeded"])
+        self.assertIn(
+            "project-instructions", report["emergency_dropped_fragments"]
+        )
+        # Маркер emergency присутствует в клипнутом тексте.
+        self.assertIn(
+            "[emergency clipped", json.dumps(messages, ensure_ascii=False)
+        )
+
+    def test_emergency_falls_back_to_runtime_error(self):
+        """Когда даже system+task не лезут в max_tokens — честный fatal RuntimeError."""
+        ctx = ContextManager("task", max_tokens=20, keep_recent_turns=0)
+        ctx.add_fragment(
+            ContextFragment(
+                id="system",
+                source="test",
+                text="core rules that are definitely longer than the tiny budget",
+                priority=0,
+                evictability="never",
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "context budget exceeded"):
+            ctx.messages()
+
+    def test_emergency_keeps_summary_rolling(self):
+        """summary:rolling (only_after_validation) не убирается emergency как рабочий фрагмент."""
+        ctx = ContextManager("task", max_tokens=700, keep_recent_turns=0)
+        ctx.add_fragment(
+            ContextFragment(
+                id="system",
+                source="test",
+                text="core",
+                priority=0,
+                evictability="never",
+            )
+        )
+        # Имитируем rolling summary как закреплённый фрагмент (как делает менеджер).
+        ctx.add_fragment(
+            ContextFragment(
+                id="summary:rolling",
+                source="madharness-mini rolling summary",
+                text="# Сводка\n" + "s" * 2000,
+                priority=15,
+                evictability="only_after_validation",
+            )
+        )
+        # Большой рабочий фрагмент — его emergency уберёт, а rolling оставит.
+        ctx.add_fragment(
+            ContextFragment(
+                id="workspace-map",
+                source="test map",
+                text="map " + "m" * 2000,
+                priority=5,
+                evictability="normal",
+            )
+        )
+
+        messages = ctx.messages()
+        report = ctx.report()
+
+        self.assertTrue(report["emergency_truncated"])
+        # Rolling summary survived в итоговом запросе.
+        self.assertIn("Сводка", json.dumps(messages, ensure_ascii=False))
+
 
 class _StubMapConfig:
     """Минимальный Config-подобный объект для WorkspaceMapProvider в тестах."""

@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .budget import (
@@ -61,10 +61,19 @@ FILE_STATE_REMINDER_ID = "file-state:reminder"
 COMPACTED_HISTORY_ID = "history:compacted"
 # Скелет не должен расти безгранично: показываем последние ходы и общий лимит.
 COMPACTED_HISTORY_MAX_LINES = 20
-COMPACTED_HISTORY_CAP_CHARS = 1500
+# Чуть увеличили: помимо скелета ходов, теперь помещаем списки прочитанных и
+# изменённых в свёрнутых ходах файлов (п.3) — модель сохраняет знание о них.
+COMPACTED_HISTORY_CAP_CHARS = 2500
+# Сколько путей показываем в каждой секции файлов свёрнутой истории.
+COMPACTED_HISTORY_MAX_FILES = 15
 
 # Идентификатор закреплённого фрагмента накопительной LLM-сводки старых ходов.
 ROLLING_SUMMARY_ID = "summary:rolling"
+
+# Маркер emergency-клиппинга инструкций: последний эшелон перед fatal помечает
+# усечённый текст, чтобы модель видела — системные правила были пожертвованы ради
+# продолжения сессии, и относилась к остатку осторожно.
+EMERGENCY_CLIP_MARKER = "\n...[emergency clipped to fit context budget]"
 
 
 @dataclass
@@ -100,10 +109,16 @@ class ContextManager:
         summary_trigger_tokens: int = 0,
         contract_protection_turns: int = 12,
         contract_protection_writes: int = 3,
+        reserve_tokens: int = 0,
     ):
         self.user_task = user_task
         self.max_tokens = max(int(max_tokens), 0)
         self.keep_recent_turns = max(int(keep_recent_turns), 0)
+        # Headroom для проактивного усечения: дроп истории срабатывает, когда
+        # оценка превышает (max_tokens - reserve_tokens), а не сам max_tokens.
+        # Так между порогом дропа и жёстким пределом остаётся запас под рост
+        # следующих ходов. 0 = выкл (поведение прежнее, порог совпадает с max).
+        self.reserve_tokens = max(int(reserve_tokens), 0)
         # Граница возрастной эвикции: assistant-текст старше этого числа ходов
         # усекается, а его tool-наблюдения сворачиваются. 0 — выкл (поведение по
         # умолчанию), чтобы не менять существующие прогоны учебного харнесса.
@@ -137,6 +152,14 @@ class ContextManager:
         # Скелет свёрнутых/выброшенных ходов: original_index -> компактная строка.
         # Ключ по индексу делает накопление идемпотентным при повторных messages().
         self._dropped_summary: dict[int, str] = {}
+        # Калибровка эвристики bytes/3 к реальному tokenizer провайдера: loop
+        # сообщает prompt_tokens из ответа модели, мы сглаживаем отношение
+        # «реальный/наш estimate» и применяем ко всем порогам бюджета. Стартуем с
+        # 1.0 — до первого record_usage поведение идентично прежней эвристике.
+        self._token_ratio = 1.0
+        # Сырая оценка последнего отправленного запроса (без ratio): нужна как
+        # база для расчёта ratio в record_usage. Сохряняется в конце messages().
+        self._last_request_estimate = 0
         self._last_stats: dict[str, int | bool] | None = None
         self._last_report: dict[str, Any] | None = None
 
@@ -147,6 +170,47 @@ class ContextManager:
         self._fragments.append(fragment)
         self._last_stats = None
         self._last_report = None
+
+    def record_usage(self, prompt_tokens: int | None) -> None:
+        """Калибруем эвристику оценки токенов по реальному usage провайдера.
+
+        Loop вызывает метод после каждого model_call, передавая prompt_tokens из
+        ответа модели. Берём отношение реального значения к нашей оценке того же
+        запроса (_last_request_estimate) и сглаживаем _token_ratio: EMA с весом
+        0.5. None/ноль/отсутствие базы — no-op (детерминированно без изменений).
+        Ratio ограничен [0.3, 3.0], чтобы разовый выброс провайдера не исказил
+        пороги бюджета. Инвалидация отчёта/статистики запускает пересчёт в下次
+        messages().
+        """
+
+        if not prompt_tokens or not self._last_request_estimate:
+            return
+        try:
+            measured = float(prompt_tokens) / float(self._last_request_estimate)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return
+        measured = max(0.3, min(3.0, measured))
+        self._token_ratio = 0.5 * self._token_ratio + 0.5 * measured
+        self._last_stats = None
+        self._last_report = None
+
+    def _over_budget(self, raw_estimate: int, *, include_reserve: bool = True) -> bool:
+        """Скорректированная оценка токенов превышает бюджет?
+
+        Применяем _token_ratio (калибровка bytes/3 к реальному tokenizer) к сырой
+        оценке и сравниваем с порогом. При include_reserve=True (по умолчанию) —
+        это проактивный порог (max_tokens - reserve_tokens), на котором работают
+        усечение и дроп: между ним и жёстким пределом остаётся запас под рост
+        следующих ходов. При include_reserve=False порог = сам max_tokens: так
+        считается hard_limit_exceeded (fatal остаётся на настоящем пределе окна).
+        """
+
+        if not self.max_tokens:
+            return False
+        threshold = self.max_tokens
+        if include_reserve and self.reserve_tokens > 0:
+            threshold = max(self.max_tokens - self.reserve_tokens, 1)
+        return int(raw_estimate * self._token_ratio) > threshold
 
     def record_assistant(self, message: dict[str, Any]) -> None:
         """Запоминаем ответ модели как следующий атомарный элемент истории."""
@@ -233,7 +297,7 @@ class ContextManager:
         clipped_tool_messages: list[dict[str, Any]] = []
         clip_limit_chars = 0
 
-        if self.max_tokens and initial_tokens > self.max_tokens:
+        if self.max_tokens and self._over_budget(initial_tokens):
             clip_limit_chars = max(
                 80,
                 min(4000, self.max_tokens * TOKEN_ESTIMATE_BYTES_PER_TOKEN // 8),
@@ -244,10 +308,7 @@ class ContextManager:
                 messages = render_messages(self.user_task, fragments, entries)
 
         current_estimate = estimate_request_tokens(messages, tools)
-        if (
-            self.max_tokens
-            and current_estimate["request_tokens_estimate"] > self.max_tokens
-        ):
+        if self._over_budget(current_estimate["request_tokens_estimate"]):
             dropped_entries = self._drop_old_entries_until_budget(
                 fragments,
                 entries,
@@ -258,10 +319,7 @@ class ContextManager:
             truncated = truncated or bool(dropped_entries)
             current_estimate = estimate_request_tokens(messages, tools)
 
-        if (
-            self.max_tokens
-            and current_estimate["request_tokens_estimate"] > self.max_tokens
-        ):
+        if self._over_budget(current_estimate["request_tokens_estimate"]):
             forced_dropped = self._drop_old_entries_until_budget(
                 fragments,
                 entries,
@@ -275,9 +333,24 @@ class ContextManager:
             truncated = truncated or bool(forced_dropped)
             current_estimate = estimate_request_tokens(messages, tools)
 
-        hard_limit_exceeded = bool(
-            self.max_tokens
-            and current_estimate["request_tokens_estimate"] > self.max_tokens
+        # Эшелон emergency (п.1 recovery): когда обычное усечение и forced-drop не
+        # справились, жертвуем рабочими фрагментами и клипаем инструкции, чтобы
+        # избежать fatal RuntimeError и дать сессии продолжиться.
+        emergency_truncated = False
+        emergency_dropped_fragments: list[str] = []
+        if self._over_budget(
+            current_estimate["request_tokens_estimate"], include_reserve=False
+        ):
+            success, emergency_dropped_fragments, fragments, messages = (
+                self._emergency_truncate(fragments, entries, entry_indexes, tools)
+            )
+            if success:
+                emergency_truncated = True
+                truncated = True
+                current_estimate = estimate_request_tokens(messages, tools)
+
+        hard_limit_exceeded = self._over_budget(
+            current_estimate["request_tokens_estimate"], include_reserve=False
         )
         context_packet = _context_packet_report(
             self.user_task,
@@ -296,14 +369,20 @@ class ContextManager:
             "dropped_entries": len(dropped_entries),
             "truncated": truncated,
             "hard_limit_exceeded": hard_limit_exceeded,
+            "token_ratio": self._token_ratio,
+            "emergency_truncated": emergency_truncated,
         }
         self._last_report = {
             "max_tokens": self.max_tokens,
             "initial_request_tokens_estimate": initial_tokens,
             **current_estimate,
-            "over_budget": bool(self.max_tokens and initial_tokens > self.max_tokens),
+            "over_budget": self._over_budget(initial_tokens),
             "truncated": truncated,
             "hard_limit_exceeded": hard_limit_exceeded,
+            "token_ratio": self._token_ratio,
+            "reserve_tokens": self.reserve_tokens,
+            "emergency_truncated": emergency_truncated,
+            "emergency_dropped_fragments": emergency_dropped_fragments,
             "fragments": [_fragment_report(fragment) for fragment in fragments],
             "context_packet": context_packet,
             "history": {
@@ -322,6 +401,10 @@ class ContextManager:
                 ],
             },
         }
+        # Сырая оценка (без ratio) — база для следующего record_usage. Берём её
+        # только при успехе: при RuntimeError запрос не уходит, калибровка по нему
+        # некорректна.
+        self._last_request_estimate = current_estimate["request_tokens_estimate"]
         if hard_limit_exceeded:
             raise RuntimeError(
                 "context budget exceeded after truncation: "
@@ -470,6 +553,10 @@ class ContextManager:
         ограничиваем общий размер COMPACTED_HISTORY_CAP_CHARS через clip_text.
         Фрагмент отдельный, а не замена записи: это исключает рекурсию бюджета и
         двойной учёт, а ключ-индекс гарантирует идемпотентность накопления.
+
+        Помимо скелета ходов, показываем списки прочитанных и изменённых в
+        свёрнутом диапазоне файлов (п.3): модель сохраняет знание, с какими путями
+        работала, даже когда детали хода ушли в skeleton. Источник — _file_state.
         """
 
         if not self._dropped_summary:
@@ -478,6 +565,21 @@ class ContextManager:
         lines = ["# Свёрнутые ходы"]
         for index, skeleton in ordered:
             lines.append(f"turn {index}: {skeleton}")
+        # Граница свёрнутого диапазона — самый большой выброшенный индекс. Чтения
+        # и правки с меньшим turn точно ушли из активной истории и заслуживают
+        # упоминания; более свежие — ещё в окне, их не дублируем.
+        compacted_boundary = max(self._dropped_summary)
+        read_files, modified_files = self._compacted_file_lists(compacted_boundary)
+        if read_files:
+            lines.append("")
+            lines.append("## Прочитанные ранее файлы")
+            for path in read_files:
+                lines.append(f"- {path}")
+        if modified_files:
+            lines.append("")
+            lines.append("## Изменённые ранее файлы")
+            for path in modified_files:
+                lines.append(f"- {path}")
         text = clip_text("\n".join(lines), COMPACTED_HISTORY_CAP_CHARS)
         return ContextFragment(
             id=COMPACTED_HISTORY_ID,
@@ -491,6 +593,40 @@ class ContextManager:
             evictability="preferred",
             stability="turn",
             applicability="current_task",
+        )
+
+    def _compacted_file_lists(
+        self, compacted_boundary: int
+    ) -> tuple[list[str], list[str]]:
+        """Списки путей, задействованных в свёрнутом диапазоне (turn <= границы).
+
+        read_files — прочитанные, но не правленные после чтения (только чтение в
+        свёрнутом диапазоне). modified_files — правленные (write/patch). Путь
+        может попасть в обе группы, если его читали и правили в разных ходах: это
+        корректно, обе операции важны для модели. Ограничиваем каждую секцию
+        COMPACTED_HISTORY_MAX_FILES путями, сортируем по последнему turn операции.
+        """
+
+        read_files: list[tuple[str, int]] = []
+        modified_files: list[tuple[str, int]] = []
+        for path, state in self._file_state.items():
+            read_in_range = (
+                state.last_read_turn is not None
+                and state.last_read_turn <= compacted_boundary
+            )
+            write_in_range = (
+                state.last_write_turn is not None
+                and state.last_write_turn <= compacted_boundary
+            )
+            if read_in_range:
+                read_files.append((path, state.last_read_turn or 0))
+            if write_in_range:
+                modified_files.append((path, state.last_write_turn or 0))
+        read_files.sort(key=lambda item: item[1], reverse=True)
+        modified_files.sort(key=lambda item: item[1], reverse=True)
+        return (
+            [path for path, _ in read_files[:COMPACTED_HISTORY_MAX_FILES]],
+            [path for path, _ in modified_files[:COMPACTED_HISTORY_MAX_FILES]],
         )
 
     def _is_protected_read(self, path: str | None, read_turn: int) -> bool:
@@ -775,6 +911,113 @@ class ContextManager:
             applicability="current_task",
         )
 
+    def _emergency_truncate(
+        self,
+        fragments: list[ContextFragment],
+        entries: list[HistoryEntry],
+        entry_indexes: list[int],
+        tools: list[dict[str, Any]] | None,
+    ) -> tuple[bool, list[str], list[ContextFragment], list[dict[str, Any]]]:
+        """Последний эшелон перед fatal RuntimeError (п.1 recovery).
+
+        Жертвуем рабочими фрагментами и клипаем инструкции, чтобы вписаться в
+        max_tokens, когда обычное усечение и forced-drop не справились. Работает
+        по существующей evictability-классификации фрагментов, без хардкода id:
+
+        1. Убираем фрагменты с evictability in ('normal','preferred') — это карта
+           проекта, напоминание о файлах, скелет свёрнутой истории. Системный
+           промпт, project-instructions и rolling summary (never /
+           only_after_validation / goal_update_only) остаются.
+        2. Если не вписались — клипаем project-instructions до половины длины.
+        3. Если не вписались — клипаем системный промпт аналогично.
+
+        Возвращает (успех, id затронутых фрагментов, итоговые фрагменты, messages).
+        При неудаче (даже system+task не лезут) — (False, ..., фрагменты, messages),
+        что вызывающая сторона трактует как fatal RuntimeError. Сравнение везде по
+        жёсткому max_tokens (include_reserve=False): reserve — запас для
+        проактивного дропа, emergency работает на самом пределе окна.
+        """
+
+        dropped_ids: list[str] = []
+        # 1. Убираем эвиктируемые рабочие фрагменты.
+        emergency_fragments = [
+            fragment
+            for fragment in fragments
+            if fragment.evictability not in ("normal", "preferred")
+        ]
+        removed = [
+            fragment.id
+            for fragment in fragments
+            if fragment.evictability in ("normal", "preferred")
+        ]
+        dropped_ids.extend(removed)
+        messages = render_messages(self.user_task, emergency_fragments, entries)
+        estimate = estimate_request_tokens(messages, tools)["request_tokens_estimate"]
+        if not self._over_budget(estimate, include_reserve=False):
+            return True, dropped_ids, emergency_fragments, messages
+
+        # 2. Клипаем project-instructions (only_after_validation) до половины.
+        clipped_project = self._emergency_clip_stage(
+            emergency_fragments, "only_after_validation"
+        )
+        if clipped_project is not None:
+            dropped_ids.extend(
+                fragment.id
+                for fragment in clipped_project
+                if EMERGENCY_CLIP_MARKER in fragment.text
+            )
+            emergency_fragments = clipped_project
+            messages = render_messages(self.user_task, emergency_fragments, entries)
+            estimate = estimate_request_tokens(messages, tools)[
+                "request_tokens_estimate"
+            ]
+            if not self._over_budget(estimate, include_reserve=False):
+                return True, dropped_ids, emergency_fragments, messages
+
+        # 3. Клипаем системный промпт (never) до половины.
+        clipped_system = self._emergency_clip_stage(emergency_fragments, "never")
+        if clipped_system is not None:
+            dropped_ids.extend(
+                fragment.id
+                for fragment in clipped_system
+                if EMERGENCY_CLIP_MARKER in fragment.text
+                and fragment.id not in dropped_ids
+            )
+            emergency_fragments = clipped_system
+            messages = render_messages(self.user_task, emergency_fragments, entries)
+            estimate = estimate_request_tokens(messages, tools)[
+                "request_tokens_estimate"
+            ]
+            if not self._over_budget(estimate, include_reserve=False):
+                return True, dropped_ids, emergency_fragments, messages
+
+        return False, dropped_ids, emergency_fragments, messages
+
+    def _emergency_clip_stage(
+        self, fragments: list[ContextFragment], evictability: str
+    ) -> list[ContextFragment] | None:
+        """Клипаем фрагменты указанной evictability-стадии до половины длины.
+
+        Возвращает новый список с клипнутым text (маркер emergency добавлен) или
+        None, если ни один фрагмент этой стадии не изменился. Маркер показывает
+        модели, что правила пожертвованы частью длины ради продолжения сессии.
+        """
+
+        result = list(fragments)
+        changed = False
+        for index, fragment in enumerate(result):
+            if fragment.evictability != evictability:
+                continue
+            if not fragment.text.strip():
+                continue
+            limit = max(len(fragment.text) // 2, 1)
+            if len(fragment.text) <= limit:
+                continue
+            clipped_text = clip_text(fragment.text, limit) + EMERGENCY_CLIP_MARKER
+            result[index] = replace(fragment, text=clipped_text)
+            changed = True
+        return result if changed else None
+
     def _drop_old_entries_until_budget(
         self,
         fragments: list[ContextFragment],
@@ -794,8 +1037,9 @@ class ContextManager:
         protected_start = max(len(entries) - keep_recent, 0)
         while (
             entries
-            and estimate_request_tokens(messages, tools)["request_tokens_estimate"]
-            > self.max_tokens
+            and self._over_budget(
+                estimate_request_tokens(messages, tools)["request_tokens_estimate"]
+            )
         ):
             removable = next(
                 (

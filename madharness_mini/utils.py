@@ -38,6 +38,14 @@ DEFAULT_CONFIG = {
     # flappy2, LeaderboardPorts.js → 8 правок в соседних путях).
     "context_contract_protection_turns": 12,
     "context_contract_protection_writes": 3,
+    # Headroom до context_max_tokens: при оценке свыше (max_tokens - reserve)
+    # дроп истории срабатывает проактивно, оставляя запас под рост следующих
+    # ходов. 0 = выкл, порог дропа совпадает с max_tokens (прежнее поведение).
+    "context_reserve_tokens": 0,
+    # Сохранять полный stdout/stderr shell-команды во временный файл при обрезке,
+    # оставляя модели хвост (там ошибки/итог) и путь для перечитывания через
+    # read_file. False = прежнее поведение (clipped головы, полный вывод теряется).
+    "context_shell_full_output": True,
     "context_workspace_map": True,
     "context_workspace_map_depth": 3,
     "context_workspace_map_max_entries": 200,
@@ -73,6 +81,20 @@ def clipped(text: str, limit: int = MAX_OUTPUT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[clipped {len(text) - limit} chars]"
+
+
+def clip_tail(text: str, limit: int = MAX_OUTPUT) -> tuple[str, bool]:
+    """Возвращаем хвост текста и признак обрезки.
+
+    Для вывода команд (run_shell) хвост информативнее головы: там обычно ошибки и
+    итог выполнения, а начало — шум версий и баннеров. При превышении limit даём
+    последние limit символов с маркером, сколько отрезано от начала. Полный вывод
+    при этом сохраняет вызывающая сторона (run_shell пишет его во временный файл).
+    """
+
+    if len(text) <= limit:
+        return text, False
+    return text[-limit:], True
 
 
 def ok(

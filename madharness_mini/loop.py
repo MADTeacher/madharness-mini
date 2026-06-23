@@ -108,6 +108,18 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
         model_response=model_response_summary(raw),
         raw=raw,
     )
+    # Калибровка оценки токенов по реальному usage (как в run_model_loop).
+    usage = raw.get("usage")
+    if isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens")
+        if isinstance(prompt_tokens, bool) or prompt_tokens is None:
+            prompt_tokens = None
+        else:
+            try:
+                prompt_tokens = int(prompt_tokens)
+            except (TypeError, ValueError):
+                prompt_tokens = None
+        context.record_usage(prompt_tokens)
     message = raw["choices"][0]["message"]
     hooks.emit(
         "after_model_call",

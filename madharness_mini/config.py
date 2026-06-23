@@ -2,12 +2,18 @@
 
 import json
 import os
+import time
 from pathlib import Path
 
 from .utils import DEFAULT_CONFIG, STATE_DIR
 
 IMAGE_DETAIL_VALUES = {"auto", "low", "high", "original"}
 ORCHESTRATION_MODE_VALUES = {"off", "requested", "auto", "required"}
+
+# Сколько дней храним полные выводы shell-команд в state_dir/tool_outputs перед
+# автоматической очисткой при очередном ensure_dirs. Баланс между возможностью
+# перечитать вывод и бесконтрольным ростом каталога в длинных проектах.
+TOOL_OUTPUTS_TTL_DAYS = 7
 
 
 class Config:
@@ -35,9 +41,14 @@ class Config:
         """Создаём каталог состояния и пустой config.json, если их ещё нет.
 
         Вызывается перед записью трассы, чтобы `traces/` всегда существовал.
+        Также поддерживает `tool_outputs/` (полные выводы shell-команд при обрезке)
+        и раз в запуск подчищает файлы старше TOOL_OUTPUTS_TTL_DAYS.
         """
 
         (self.state_dir / "traces").mkdir(parents=True, exist_ok=True)
+        outputs = self.state_dir / "tool_outputs"
+        outputs.mkdir(parents=True, exist_ok=True)
+        _sweep_tool_outputs(outputs)
         cfg = self.state_dir / "config.json"
         if not cfg.exists():
             cfg.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
@@ -175,3 +186,21 @@ def parse_int_env(name: str, value: str) -> int:
     if parsed < 0:
         raise RuntimeError(f"invalid {name}: {value}; expected non-negative integer")
     return parsed
+
+
+def _sweep_tool_outputs(outputs_dir: Path) -> None:
+    """Удаляем файлы полных выводов старше TOOL_OUTPUTS_TTL_DAYS.
+
+    Очистка нужна, чтобы каталог не рос бесконтрольно в долгих проектах: модель
+    обычно перечитывает свежий вывод сразу, а недельные логи уже неактуальны.
+    Ошибки удаления молча игнорируем — очистка не должна ронять запуск harness.
+    """
+
+    cutoff = time.time() - TOOL_OUTPUTS_TTL_DAYS * 24 * 3600
+    for path in outputs_dir.glob("*"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            # Часть файлов может быть занята или недоступна — пропускаем.
+            pass

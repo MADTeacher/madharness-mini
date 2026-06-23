@@ -2,10 +2,11 @@
 
 import shlex
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
-from ..utils import clipped, fail, obj, ok, strp
+from ..utils import MAX_OUTPUT, clipped, clip_tail, fail, obj, ok, strp
 from .context import ToolContext
 from .specs import ToolSpec
 
@@ -32,15 +33,65 @@ def run_shell(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         cwd_display = str(cwd.relative_to(ctx.cfg.root))
     except ValueError:
         cwd_display = str(cwd)
-    return ok(
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    full_output_enabled = bool(ctx.cfg.data.get("context_shell_full_output", True))
+    if full_output_enabled:
+        stdout_view, stdout_truncated, stdout_full_path = _clip_with_full_output(
+            ctx, stdout
+        )
+        stderr_view, stderr_truncated, stderr_full_path = _clip_with_full_output(
+            ctx, stderr
+        )
+    else:
+        # Прежнее поведение: голова вывода через clipped, полный вывод теряется.
+        stdout_view, stdout_truncated, stdout_full_path = clipped(stdout), False, None
+        stderr_view, stderr_truncated, stderr_full_path = clipped(stderr), False, None
+    observation = ok(
         "run_shell",
         f"exit code {proc.returncode}",
         command=command,
         cwd=cwd_display or ".",
         returncode=proc.returncode,
-        stdout=clipped(proc.stdout),
-        stderr=clipped(proc.stderr),
+        stdout=stdout_view,
+        stderr=stderr_view,
     )
+    if stdout_truncated:
+        observation["stdout_truncated"] = True
+        observation["stdout_original_chars"] = len(stdout)
+        if stdout_full_path is not None:
+            observation["stdout_full_path"] = stdout_full_path
+    if stderr_truncated:
+        observation["stderr_truncated"] = True
+        observation["stderr_original_chars"] = len(stderr)
+        if stderr_full_path is not None:
+            observation["stderr_full_path"] = stderr_full_path
+    return observation
+
+
+def _clip_with_full_output(
+    ctx: ToolContext, text: str
+) -> tuple[str, bool, str | None]:
+    """Хвост вывода + сохранение полного текста во временный файл при обрезке.
+
+    Возвращает (текст для модели, признак обрезки, путь к файлу или None). Если
+    обрезки нет — путь не нужен, текст возвращается как есть. Полный вывод пишем
+    в state_dir/tool_outputs/, который гарантирует ensure_dirs. Модель может
+    перечитать полный файл через read_file, если ей нужен контекст от начала.
+    """
+
+    view, truncated = clip_tail(text, MAX_OUTPUT)
+    if not truncated:
+        return view, False, None
+    outputs_dir = ctx.cfg.state_dir / "tool_outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    file_path = outputs_dir / f"shell-{uuid.uuid4().hex[:8]}.log"
+    try:
+        file_path.write_text(text, encoding="utf-8")
+    except OSError:
+        # Не удалось сохранить полный вывод — отдаём хвост без пути. Модель видит
+        # признак обрезки, но перечитать уже не сможет. Лучше, чем ронять команду.
+        return view, True, None
+    return view, True, str(file_path)
 
 
 def _run_command(

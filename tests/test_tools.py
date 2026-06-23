@@ -274,6 +274,85 @@ class ToolTests(HarnessTestCase):
         self.assertEqual(obs["cwd"], "sub")
         self.assertEqual(obs["returncode"], 0)
 
+    def test_run_shell_saves_full_output_to_file_on_truncation(self):
+        """При обрезке длинного stdout полный вывод уходит в файл, модели — хвост."""
+        import subprocess
+        from unittest.mock import patch
+
+        from madharness_mini.utils import MAX_OUTPUT
+
+        cfg = self.make_cfg()
+        cfg.ensure_dirs()
+        huge_stdout = "BEGIN_HEAD_LINE\n" + "x" * (MAX_OUTPUT + 5000)
+        fake_proc = subprocess.CompletedProcess(
+            args=["echo"], returncode=0, stdout=huge_stdout, stderr=""
+        )
+        with patch(
+            "madharness_mini.tools.shell.subprocess.run", return_value=fake_proc
+        ):
+            obs = ToolRegistry(cfg).call("run_shell", {"command": "echo big"})
+
+        self.assertTrue(obs["ok"])
+        self.assertTrue(obs["stdout_truncated"])
+        self.assertEqual(obs["stdout_original_chars"], len(huge_stdout))
+        # Модели отдали хвост, а не голову.
+        self.assertIn("x", obs["stdout"])
+        self.assertNotIn("BEGIN_HEAD_LINE", obs["stdout"])
+        # Полный вывод сохранён, файл содержит начало (голову).
+        full_path = Path(obs["stdout_full_path"])
+        self.assertTrue(full_path.is_file())
+        self.assertEqual(full_path.read_text(encoding="utf-8"), huge_stdout)
+
+    def test_run_shell_no_truncation_when_output_below_limit(self):
+        """Короткий вывод не помечается обрезанным, файл не создаётся."""
+        import subprocess
+        from unittest.mock import patch
+
+        cfg = self.make_cfg()
+        cfg.ensure_dirs()
+        fake_proc = subprocess.CompletedProcess(
+            args=["echo"], returncode=0, stdout="short output\n", stderr=""
+        )
+        with patch(
+            "madharness_mini.tools.shell.subprocess.run", return_value=fake_proc
+        ):
+            obs = ToolRegistry(cfg).call("run_shell", {"command": "echo short"})
+
+        self.assertTrue(obs["ok"])
+        self.assertNotIn("stdout_truncated", obs)
+        self.assertNotIn("stdout_full_path", obs)
+        self.assertEqual(obs["stdout"], "short output\n")
+
+    def test_run_shell_respects_disabled_full_output_flag(self):
+        """При context_shell_full_output=False — прежняя семантика головы, файла нет."""
+        import subprocess
+        from unittest.mock import patch
+
+        from madharness_mini.utils import MAX_OUTPUT
+
+        cfg = self.make_cfg()
+        cfg.data["context_shell_full_output"] = False
+        cfg.ensure_dirs()
+        huge_stdout = "HEAD_LINE\n" + "y" * (MAX_OUTPUT + 1000)
+        fake_proc = subprocess.CompletedProcess(
+            args=["echo"], returncode=0, stdout=huge_stdout, stderr=""
+        )
+        with patch(
+            "madharness_mini.tools.shell.subprocess.run", return_value=fake_proc
+        ):
+            obs = ToolRegistry(cfg).call("run_shell", {"command": "echo big"})
+
+        self.assertTrue(obs["ok"])
+        # Прежняя семантика: голова через clipped, без признаков обрезки и файла.
+        self.assertIn("HEAD_LINE", obs["stdout"])
+        self.assertIn("[clipped", obs["stdout"])
+        self.assertNotIn("stdout_truncated", obs)
+        self.assertNotIn("stdout_full_path", obs)
+        # Файл не должен был создаться.
+        outputs_dir = cfg.state_dir / "tool_outputs"
+        log_files = list(outputs_dir.glob("shell-*.log"))
+        self.assertEqual(log_files, [])
+
     def test_system_prompt_describes_tool_recovery_rules(self):
         prompt = Path("madharness_mini/prompts/system.md").read_text(encoding="utf-8")
 

@@ -46,6 +46,10 @@ def base_context(
         contract_protection_writes=int(
             cfg.data.get("context_contract_protection_writes", 3)
         ),
+        # Headroom для проактивного усечения истории (п.4): дроп срабатывает при
+        # оценке свыше max_tokens - reserve, оставляя запас под рост следующих
+        # ходов. 0 = выкл (поведение прежнее).
+        reserve_tokens=int(cfg.data.get("context_reserve_tokens", 0)),
         summarizer=summarizer,
         summary_trigger_tokens=(
             summary_trigger_tokens

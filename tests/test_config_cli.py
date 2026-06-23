@@ -275,3 +275,31 @@ class ConfigCliTests(HarnessTestCase):
             (root / ".madharness-mini" / "config.json").read_text(encoding="utf-8")
         )
         self.assertEqual(data["api_key"], "secret")
+
+    def test_ensure_dirs_creates_and_sweeps_tool_outputs(self):
+        """ensure_dirs создаёт tool_outputs и подчищает файлы старше TTL дней."""
+        import time
+
+        from madharness_mini.config import TOOL_OUTPUTS_TTL_DAYS
+
+        cfg = self.make_cfg()
+        outputs = cfg.state_dir / "tool_outputs"
+        outputs.mkdir(parents=True, exist_ok=True)
+        # Старый файл: backdate mtime за границу TTL.
+        stale = outputs / "shell-stale.log"
+        stale.write_text("old", encoding="utf-8")
+        old_mtime = time.time() - (TOOL_OUTPUTS_TTL_DAYS + 1) * 24 * 3600
+        os.utime(stale, (old_mtime, old_mtime))
+        # Свежий файл: должен остаться.
+        fresh = outputs / "shell-fresh.log"
+        fresh.write_text("new", encoding="utf-8")
+
+        cfg.ensure_dirs()
+
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
+
+    def test_default_config_enables_shell_full_output(self):
+        """По умолчанию полный вывод shell сохраняется во временный файл."""
+        cfg = self.make_cfg()
+        self.assertIs(cfg.data["context_shell_full_output"], True)

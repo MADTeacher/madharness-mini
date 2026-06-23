@@ -162,6 +162,11 @@ def run_model_loop(
             model_response=model_response_summary(raw),
             message=message,
         )
+        # Калибруем эвристику оценки токенов по реальному usage провайдера:
+        # это уточняет пороги бюджета и reduces ложные срабатывания/промахи.
+        usage = raw.get("usage")
+        if isinstance(usage, dict):
+            context.record_usage(_optional_int(usage.get("prompt_tokens")))
         emit_hook(
             hooks,
             "after_model_call",
