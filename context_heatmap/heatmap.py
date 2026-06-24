@@ -45,6 +45,21 @@ SIGNAL_LABELS = {
     "fill_share": "FILL",
 }
 
+# Короткие читаемые подписи типов фрагментов: целые слова вместо обрезки по
+# 10 символов (раньше легенда показывала «TOOL OUTPU», «USER MESSA»).
+SOURCE_LABELS = {
+    "system_instruction": "SYSTEM",
+    "developer_instruction": "DEVELOPER",
+    "user_message": "USER",
+    "context_fragment": "CONTEXT",
+    "file_snippet": "FILE",
+    "test_result": "TEST",
+    "tool_schema": "SCHEMA",
+    "assistant_message": "ASSISTANT",
+    "tool_output": "TOOL OUT",
+    "unknown": "UNKNOWN",
+}
+
 # Цвета действий в action track. Имена соответствуют группам из anatomy_data.
 ACTION_COLORS = {
     "read": (86, 166, 217),
@@ -124,7 +139,8 @@ def _draw_header(canvas: _Canvas, data: dict[str, Any]) -> None:
         f"FIX {_safe_float(metrics.get('max_fixed_instruction_cost')):.2f}  "
         f"GOAL {_safe_float(metrics.get('max_goal_anchor_cost')):.2f}"
     )
-    canvas.text(LEFT, 48, line, MUTED, scale=1)
+    # Сводка сессии — ключевая строка, поэтому тёмным TEXT, а не блёклым MUTED.
+    canvas.text(LEFT, 48, line, TEXT, scale=1)
 
 
 def _draw_verdict(canvas: _Canvas, data: dict[str, Any]) -> None:
@@ -188,7 +204,7 @@ def _draw_legend(canvas: _Canvas, data: dict[str, Any]) -> None:
     present = _present_source_types(data)
     for source_type in present:
         color = SOURCE_COLORS.get(source_type, SOURCE_COLORS["unknown"])
-        label = _ascii(source_type.replace("_", " ")[:10].upper())
+        label = _ascii(SOURCE_LABELS.get(source_type, source_type.upper()))
         canvas.rect(cursor_x, LEGEND_Y, 12, 12, color)
         canvas.rect_outline(cursor_x, LEGEND_Y, 12, 12, (150, 150, 150))
         canvas.text(cursor_x + 16, LEGEND_Y + 3, label, MUTED, scale=1)
@@ -234,11 +250,14 @@ def _draw_mass_block(
     canvas.text(LEFT, MASS_Y - 18, "FRAGMENT MASS BY TYPE  % OF WINDOW", TEXT, scale=1)
     canvas.rect(LEFT, MASS_Y, GRAPH_W, MASS_H, PANEL)
     canvas.rect_outline(LEFT, MASS_Y, GRAPH_W, MASS_H, (180, 185, 190))
-    # Горизонтальная сетка 25/50/75/100%.
-    for ratio in (0.25, 0.50, 0.75, 1.00):
-        yy = MASS_Y + int(MASS_H * ratio)
-        canvas.line(LEFT, yy, RIGHT, yy, GRID)
-        canvas.text(40, yy - 4, f"{int(ratio * 100)}%", MUTED, scale=1)
+    # Сетка считается от низа: 0% у основания, 100% у верха — так совпадает с
+    # направлением роста столбцов (заливка растёт снизу вверх).
+    for ratio in (0.0, 0.25, 0.50, 0.75, 1.00):
+        yy = MASS_Y + MASS_H - int(MASS_H * ratio)
+        if 0.0 < ratio < 1.0:
+            canvas.line(LEFT, yy, RIGHT, yy, GRID)
+        label_y = min(max(yy - 3, MASS_Y + 1), MASS_Y + MASS_H - 8)
+        canvas.text(40, label_y, f"{int(ratio * 100)}%", MUTED, scale=1)
 
     if not columns:
         canvas.text(LEFT + 24, MASS_Y + MASS_H // 2 - 8, "NO MODEL CALLS", MUTED, scale=2)
@@ -310,6 +329,12 @@ def _draw_signals_block(
     for row, key in enumerate(signals):
         row_y = SIGNALS_Y + row * row_h
         canvas.text(40, row_y + row_h // 2 - 3, SIGNAL_LABELS[key], MUTED, scale=1)
+        # Базовая линия дорожки + явная метка пустого сигнала: пустая дорожка
+        # должна читаться как «0», а не как «данные не посчитаны».
+        baseline_y = row_y + row_h - 2
+        canvas.line(LEFT, baseline_y, RIGHT, baseline_y, (214, 218, 224))
+        if columns and not any(_safe_float(c.get(key)) > 0.0 for c in columns):
+            canvas.text(LEFT + 6, row_y + row_h // 2 - 3, "0 - NONE", (158, 162, 168), scale=1)
         # Пороговая линия на дорожке FILL — калибровка глаз под danger/warning.
         if key == "fill_share":
             for thr, color in (
@@ -354,6 +379,17 @@ def _draw_action_track(
     """Цветные квадраты действий: read/write/patch/list/run/test по ходам."""
 
     canvas.text(40, ACTION_Y + ACTION_H // 2 - 3, "ACTION", MUTED, scale=1)
+    # Легенда действий в зазоре над дорожкой: без неё цветные квадратики
+    # read/write/test/list/run не читаются.
+    legend_y = ACTION_Y - 14
+    cursor_x = LEFT
+    for group in ("read", "write", "test", "list", "run", "other"):
+        color = ACTION_COLORS[group]
+        label = group.upper()
+        canvas.rect(cursor_x, legend_y, 10, 10, color)
+        canvas.rect_outline(cursor_x, legend_y, 10, 10, (150, 150, 150))
+        canvas.text(cursor_x + 14, legend_y + 2, label, MUTED, scale=1)
+        cursor_x += 14 + len(label) * 6 + 14
     canvas.rect(LEFT, ACTION_Y, GRAPH_W, ACTION_H, PANEL)
     canvas.rect_outline(LEFT, ACTION_Y, GRAPH_W, ACTION_H, (200, 204, 210))
     groups = data.get("action_groups") or {}
@@ -376,25 +412,23 @@ def _draw_seams(
     data: dict[str, Any],
     turn_to_x: dict[int, int],
 ) -> None:
-    """Швы summarization — вертикальные линии поверх блоков A/B/markers/actions.
+    """Швы контекста — только аварийное усечение (truncated/dropped).
 
-    Серая сплошная — harness свернул историю в digest; янтарная пунктирная —
-    аварийное усечение (truncated/dropped). Рисуем именно поверх, чтобы «шов»
-    контекста читался на любой высоте блоков.
+    Обычные digest-швы намеренно не рисуем: на длинной сессии свёртка истории
+    происходит почти каждый ход, и вертикальные линии превращались в рябящий
+    «штрих-код» поверх блоков. Оставляем лишь редкий янтарный маркер усечения —
+    он критичен и встречается нечасто, поэтому не мешает чтению.
     """
 
     top = MASS_Y
     bottom = ACTION_Y + ACTION_H
     for seam in data.get("seams") or []:
+        if not bool(seam.get("truncated")):
+            continue
         x = turn_to_x.get(_safe_int(seam.get("turn_id")))
         if x is None:
             continue
-        if bool(seam.get("truncated")):
-            # Аварийное усечение — янтарный пунктир, заметнее обычного шва.
-            _draw_dashed_v(canvas, x, top, bottom, WARNING, dash=6)
-        else:
-            # Обычный digest-шов: тёмно-серый, чтобы читать на любой высоте блоков.
-            canvas.line(x, top, x, bottom, (120, 126, 134))
+        _draw_dashed_v(canvas, x, top, bottom, WARNING, dash=6)
 
 
 def _draw_axis(canvas: _Canvas, columns: list[dict[str, Any]]) -> None:

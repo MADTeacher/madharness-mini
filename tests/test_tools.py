@@ -688,6 +688,80 @@ class ToolTests(HarnessTestCase):
         self.assertTrue(obs["retryable"])
         self.assertIn("patch", obs["hint"])
 
+    def test_apply_patch_missing_end_patch_returns_tail_snippet(self):
+        # Воспроизводим сбой из flappy2 turn 22: патч оборвался на сломанном
+        # хвосте (dangling '+}' и пустая добавленная строка). Маркер не «забыт»,
+        # а потерян из-за несогласованного конца — показываем модели её хвост.
+        cfg = self.make_cfg()
+        path = cfg.root / "hello.txt"
+        path.write_text("one\ntwo\n", encoding="utf-8")
+
+        obs = ToolRegistry(cfg).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: hello.txt",
+                        "@@",
+                        " one",
+                        "-two",
+                        "+two",
+                        "+}",
+                        "+",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(obs["ok"])
+        self.assertEqual(obs["summary"], "patch must end with *** End Patch")
+        self.assertEqual(obs["where"], "tail")
+        self.assertTrue(obs["retryable"])
+        # Модель видит свой собственный хвост и конкретную причину.
+        self.assertIn("patch_snippet", obs)
+        self.assertIn("+}", obs["patch_snippet"])
+        self.assertIn("dangling", obs["hint"])
+        # Файл не тронут: парсер отверг до записи.
+        self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    def test_apply_patch_repeated_hunk_is_marked_already_applied(self):
+        # Истинный already-applied: old_lines отсутствуют, но new_lines уже
+        # дословно в файле — значит правка была применена ранее. Не падаем в
+        # found 0 и не зацикливаемся, а помечаем файл как already-applied.
+        cfg = self.make_cfg()
+        path = cfg.root / "hello.txt"
+        # Файл уже содержит результат правки «two -> two_changed».
+        path.write_text("one\ntwo_changed\n", encoding="utf-8")
+
+        obs = ToolRegistry(cfg).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: hello.txt",
+                        "@@",
+                        " one",
+                        "-two",
+                        "+two_changed",
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+
+        self.assertTrue(obs["ok"])
+        self.assertIn("already applied", obs["summary"])
+        self.assertIn("already_applied_files", obs)
+        # Путь в already_applied_files абсолютный — сравниваем по имени файла.
+        self.assertTrue(
+            any(p.endswith("hello.txt") for p in obs["already_applied_files"]),
+            obs["already_applied_files"],
+        )
+        # Файл не изменился: повторная правка — no-op.
+        self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo_changed\n")
+
     def test_apply_patch_format_failure_explains_patch_boundaries(self):
         obs = ToolRegistry(self.make_cfg()).call(
             "apply_patch",
@@ -706,9 +780,13 @@ class ToolTests(HarnessTestCase):
         self.assertFalse(obs["ok"])
         self.assertEqual(obs["summary"], "patch must start with *** Begin Patch")
         self.assertTrue(obs["retryable"])
-        self.assertIn("starting with *** Begin Patch", obs["hint"])
-        self.assertIn("ending with *** End Patch", obs["hint"])
-        self.assertIn("Do not wrap it in a shell command", obs["hint"])
+        # Diagnostic: показываем модели её голову патча, чтобы она увидела
+        # wrap в shell-команду/JSON/prose вместо чистого patch-текста.
+        self.assertEqual(obs["where"], "head")
+        self.assertIn("patch_snippet", obs)
+        self.assertIn("apply_patch <<'PATCH'", obs["patch_snippet"])
+        self.assertIn("ONLY the patch text", obs["hint"])
+        self.assertIn("shell command", obs["hint"])
 
     def test_apply_patch_blank_hunk_line_explains_context_marker(self):
         cfg = self.make_cfg()
@@ -738,7 +816,59 @@ class ToolTests(HarnessTestCase):
         self.assertTrue(obs["retryable"])
         self.assertIn("Blank context lines", obs["hint"])
         self.assertIn("one leading space", obs["hint"])
+        # Self-healing: модели отдаём конкретную проблемную строку, её номер и
+        # excerpt реальных строк файла — чтобы она видела, что поправить, и не
+        # сбегала в write_file после абстрактного hint.
+        self.assertEqual(obs["bad_line"], "")
+        self.assertEqual(obs["bad_line_number"], 5)
+        self.assertIn("current_excerpt", obs)
+        self.assertIn("1: one", obs["current_excerpt"])
         self.assertEqual(path.read_text(encoding="utf-8"), "one\n\ntwo\n")
+
+    def test_apply_patch_invalid_hunk_line_includes_line_number_and_excerpt(self):
+        """Non-empty malformed hunk line: диагностика указывает на неё и даёт excerpt.
+
+        Покрывает случай, когда проблемная строка — не пустая, а с табом/мусором:
+        bad_line отражает её дословно, bad_line_number — позицию в патче,
+        current_excerpt содержит реальные строки файла для перестройки hunk'а.
+        """
+
+        cfg = self.make_cfg()
+        path = cfg.root / "hello.txt"
+        path.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+        obs = ToolRegistry(cfg).call(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "*** Begin Patch",
+                        "*** Update File: hello.txt",
+                        "@@",
+                        " alpha",
+                        "\tbeta",  # таб без валидного маркера → invalid hunk line
+                        "*** End Patch",
+                    ]
+                )
+            },
+        )
+
+        self.assertFalse(obs["ok"])
+        self.assertIn("invalid hunk line: \tbeta", obs["summary"])
+        self.assertTrue(obs["retryable"])
+        self.assertEqual(obs["bad_line"], "\tbeta")
+        # bad_line_number — 1-based, от *** Begin Patch: строка 5 патча.
+        self.assertEqual(obs["bad_line_number"], 5)
+        self.assertIn("current_excerpt", obs)
+        # Excerpt несёт реальные строки файла с номерами, чтобы перестроить hunk.
+        self.assertIn("1: alpha", obs["current_excerpt"])
+        self.assertIn("2: beta", obs["current_excerpt"])
+        # Hint указывает на bad_line и советует не падать в write_file.
+        self.assertIn("bad_line", obs["hint"])
+        self.assertIn("Do not fall back to write_file", obs["hint"])
+        # Файл не должен быть тронут при ошибке парсера.
+        self.assertEqual(path.read_text(encoding="utf-8"), "alpha\nbeta\ngamma\n")
+
 
     def test_apply_patch_moves_file_without_hunk(self):
         cfg = self.make_cfg()

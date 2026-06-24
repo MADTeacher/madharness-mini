@@ -17,6 +17,11 @@ MISMATCH_EXCERPT_LIMIT = 4000
 # после, чтобы модель увидела достаточный контекст для rebuilding hunks'а.
 MISMATCH_EXCERPT_WINDOW = 10
 
+# Максимум символов проблемной строки hunk'а в observation. Обычно это одна
+# короткая строка (часто пустая), но ограничиваем на случай длинного мусора,
+# чтобы observation не раздувалось.
+BAD_LINE_LIMIT = 200
+
 
 def patch_failure_data(summary: str) -> dict[str, Any]:
     """Подсказываем модели безопасный следующий шаг после неудачного patch.
@@ -46,19 +51,11 @@ def patch_failure_data(summary: str) -> dict[str, Any]:
             ),
             "retryable": True,
         }
-    if summary == "invalid hunk line: ":
-        return {
-            "hint": (
-                "The update hunk contains a blank line without a marker. Blank "
-                "context lines must still start with one leading space. Reread the "
-                "file region and retry apply_patch with exact context markers."
-            ),
-            "retryable": True,
-        }
+    # «invalid hunk line» теперь поднимается как PatchHunkLine и ловится отдельным
+    # except в apply_patch, поэтому сюда не доходит — hint живёт в _hunk_line_hint.
     if (
         summary.startswith("patch must ")
         or summary.startswith("unexpected patch line")
-        or summary.startswith("invalid hunk line")
         or summary.startswith("add file lines must start")
         or summary == "Move to is only supported after Update File"
     ):
@@ -101,6 +98,18 @@ def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     parser = PatchParser(ctx)
     try:
         changes = parser.prepare(patch)
+    except PatchMalformed as exc:
+        # Diagnostic: показываем модели её собственный край патча, чтобы она
+        # увидела, где потеряла структуру (оборванный hunk, dangling '+}' и т.п.),
+        # а не общий «must end with *** End Patch».
+        return fail(
+            "apply_patch",
+            str(exc),
+            hint=_malformed_hint(exc),
+            retryable=True,
+            patch_snippet=exc.patch_snippet,
+            where=exc.where,
+        )
     except PatchHunkMismatch as exc:
         # Self-healing: возвращаем модели актуальный фрагмент файла, чтобы она
         # перестроила hunks из реальных строк, а не падала в write_file.
@@ -112,6 +121,23 @@ def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             expected_lines=exc.expected_lines,
             match_count=exc.match_count,
         )
+    except PatchHunkLine as exc:
+        # Self-healing для ошибок формата строки hunk: показываем модели саму
+        # проблемную строку, её номер в патче и excerpt реальных строк файла.
+        # Типичный случай — пустая строка контекста без ведущего пробела. Раньше
+        # здесь был общий hint без excerpt, и модель сбегала в write_file.
+        anchor = _best_partial_match(exc.current, exc.old_lines)
+        return fail(
+            "apply_patch",
+            str(exc),
+            hint=_hunk_line_hint(exc),
+            retryable=True,
+            bad_line=clipped(exc.bad_line, limit=BAD_LINE_LIMIT),
+            bad_line_number=exc.bad_line_number,
+            current_excerpt=_build_mismatch_excerpt(
+                exc.current, anchor, exc.old_lines
+            ),
+        )
     except ValueError as exc:
         summary = str(exc)
         return fail("apply_patch", summary, **patch_failure_data(summary))
@@ -119,9 +145,20 @@ def apply_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         if content is None:
             path.unlink()
         else:
+            # already_applied-файлы получили original в changes, пишем его же —
+            # это no-op на диске, но сохраняет атомарность цикла записи.
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-    return ok("apply_patch", f"applied patch to {len(changes)} file(s)")
+    already = sorted(str(p) for p in parser.already_applied)
+    summary = f"applied patch to {len(changes)} file(s)"
+    if already:
+        # Явно сообщаем модели, какие файлы уже содержали правку, чтобы она не
+        # повторяла тот же патч ещё раз.
+        summary += f"; already applied to {len(already)}: " + ", ".join(already)
+    result = ok("apply_patch", summary)
+    if already:
+        result["already_applied_files"] = already
+    return result
 
 
 class PatchHunkMismatch(ValueError):
@@ -147,6 +184,117 @@ class PatchHunkMismatch(ValueError):
         self.expected_lines = expected_lines
         self.current_excerpt = current_excerpt
         self.match_count = match_count
+
+
+class PatchMalformed(ValueError):
+    """Оборванный или несогласованный патч: показываем модели её собственный край.
+
+    Когда патч не обрамлён маркерами *** Begin/End Patch как положено, парсер
+    раньше выдавал общий hint. Несём модели её же хвост (или голову), чтобы она
+    увидела, где именно потеряла структуру — типично это dangling '+}', пустая
+    добавленная строка или незакрытый hunk. patch_snippet несёт обрезанный край.
+    """
+
+    def __init__(self, summary: str, *, patch_snippet: str, where: str):
+        super().__init__(summary)
+        self.patch_snippet = patch_snippet
+        # «head» или «tail» — какой край патча показан модели.
+        self.where = where
+
+
+class PatchHunkLine(ValueError):
+    """Строка hunk'а с неверным маркером: несем модели саму строку и excerpt файла.
+
+    Самая частая причина — пустая строка контекста без ведущего пробела
+    (summary «invalid hunk line: »). Старый код поднимал обычный ValueError, и
+    observation несло общий hint без указания, *какая* строка и *где* виновата,
+    а excerpt файла вообще не прикладывался. Из-за этого модель не понимала, что
+    поправить, и сбегала в write_file — ровно этот паттерн виден в трассах как
+    кластер холодных правок.
+
+    Здесь файл уже прочитан (current доступен), поэтому вместе со ссылкой на
+    проблемную строку (bad_line, bad_line_number) отдаём excerpt реальных строк
+    файла — модели есть из чего перестроить hunk, как и при PatchHunkMismatch.
+    """
+
+    def __init__(
+        self,
+        summary: str,
+        *,
+        bad_line: str,
+        bad_line_number: int,
+        current: list[str],
+        old_lines: list[str],
+    ):
+        super().__init__(summary)
+        # Проблемная строка патча дословно — типично пустая, таб или мусор.
+        self.bad_line = bad_line
+        # 1-based номер строки патча (от *** Begin Patch).
+        self.bad_line_number = bad_line_number
+        # Строки файла на момент разбора hunk'а — для excerpt вокруг частичного
+        # совпадения накопленных old_lines.
+        self.current = current
+        self.old_lines = old_lines
+
+
+def _patch_snippet(lines: list[str], where: str, limit: int = 8) -> str:
+    """Обрезанный край патча для diagnostic-observation.
+
+    where = «tail» показывает последние строки (типичный случай — оборванный
+    hunk), «head» — первые. Длинный край обрезаем, чтобы observation не раздулось.
+    """
+
+    if where == "tail":
+        chunk = lines[-limit:]
+        label = f"last {len(chunk)} lines"
+    else:
+        chunk = lines[:limit]
+        label = f"first {len(chunk)} lines"
+    return f"[{label}]\n" + "\n".join(chunk)
+
+
+def _malformed_hint(exc: PatchMalformed) -> str:
+    """Подсказка под конкретный край патча: чем именно модель потеряла структуру.
+
+    Для хвоста (нет End Patch) типичен оборванный hunk с dangling '+}' или
+    пустой добавленной строкой — упоминаем это явно. Для головы — wrap в
+    shell/JSON/prose вместо чистого patch-текста.
+    """
+
+    if exc.where == "tail":
+        return (
+            "The patch text ended without *** End Patch, which usually means the "
+            "last hunk is malformed — a dangling '+}' (unbalanced brace), a stray "
+            "'+' (empty added line), or a lost closing marker. Look at patch_snippet: "
+            "if the tail looks unfinished, re-read the file region and rebuild a "
+            "smaller, self-contained hunk ending with *** End Patch. Prefer one "
+            "logical change per patch."
+        )
+    return (
+        "The patch text does not start with *** Begin Patch, which usually means "
+        "it was wrapped in a shell command, a Markdown fence, JSON object, or "
+        "extra prose. Look at patch_snippet: send ONLY the patch text, starting "
+        "with *** Begin Patch and ending with *** End Patch."
+    )
+
+
+def _hunk_line_hint(exc: PatchHunkLine) -> str:
+    """Подсказка под конкретную проблемную строку hunk'а.
+
+    Указываем модели на её собственную строку (bad_line, bad_line_number) и
+    требуем leading space для пустых строк контекста — это типичный провал,
+    из-за которого модель раньше сбегала в write_file. Ссылаемся на
+    current_excerpt: рядом лежат реальные строки файла для перестройки hunk'а.
+    """
+
+    return (
+        f"The update hunk has a malformed line at patch line {exc.bad_line_number} "
+        f"(shown as bad_line). The most common cause is a blank line with no "
+        "marker: Blank context lines must still start with one leading space "
+        "(a truly empty line is a parse error). Look at bad_line to see the "
+        "offending text, copy the exact surrounding lines from current_excerpt, "
+        "fix the marker, and retry apply_patch. Do not fall back to write_file."
+    )
 
 
 def _build_mismatch_excerpt(
@@ -211,18 +359,37 @@ class PatchParser:
 
         lines = patch.splitlines()
         if not lines or lines[0] != "*** Begin Patch":
-            raise ValueError("patch must start with *** Begin Patch")
+            # Несём модели голову её патча, чтобы она увидела, что не так с
+            # обрамлением: типично это wrap в shell-команду/JSON/prose вместо
+            # чистого patch-текста.
+            snippet = _patch_snippet(lines or [patch], "head") if lines else patch
+            raise PatchMalformed(
+                "patch must start with *** Begin Patch",
+                patch_snippet=snippet,
+                where="head",
+            )
         if lines[-1] != "*** End Patch":
-            raise ValueError("patch must end with *** End Patch")
+            # Несём модели хвост: типично здесь оборванный hunk с dangling '+}',
+            # пустой добавленной строкой или потерянной закрывающей скобкой —
+            # модель сама так описала сбой в reasoning. Маркер не «забыт», а
+            # потерян из-за несогласованного конца.
+            raise PatchMalformed(
+                "patch must end with *** End Patch",
+                patch_snippet=_patch_snippet(lines, "tail"),
+                where="tail",
+            )
 
         changes: dict[Path, str | None] = {}
+        # Пути, чьи hunks уже лежат в файле дословно — патч повторно применён.
+        # apply_patch вернёт их как already_applied, чтобы модель не зациклилась.
+        already_applied: set[Path] = set()
         i = 1
         while i < len(lines) - 1:
             line = lines[i]
             if line.startswith("*** Add File: "):
                 i = self._parse_add_file(lines, i, changes)
             elif line.startswith("*** Update File: "):
-                i = self._parse_update_file(lines, i, changes)
+                i = self._parse_update_file(lines, i, changes, already_applied)
             elif line.startswith("*** Delete File: "):
                 i = self._parse_delete_file(lines, i, changes)
             elif line.startswith("*** Move to: "):
@@ -231,6 +398,12 @@ class PatchParser:
                 i += 1
             else:
                 raise ValueError(f"unexpected patch line: {line}")
+        if already_applied:
+            # Пробрасываем collected-множество наверх через атрибут, чтобы
+            # apply_patch мог отличить «все hunks уже применены» от обычного успеха.
+            self.already_applied = already_applied
+        else:
+            self.already_applied = set()
         return changes
 
     def _patch_path(self, raw: str) -> Path:
@@ -272,7 +445,8 @@ class PatchParser:
         return i + 1
 
     def _parse_update_file(
-        self, lines: list[str], i: int, changes: dict[Path, str | None]
+        self, lines: list[str], i: int, changes: dict[Path, str | None],
+        already_applied: set[Path],
     ) -> int:
         raw = lines[i].removeprefix("*** Update File: ")
         path = self._patch_path(raw)
@@ -293,6 +467,9 @@ class PatchParser:
         has_trailing_newline = original.endswith("\n")
         current = original.splitlines()
         saw_hunk = False
+        # Число hunks, пропущенных как уже-применённые. Если были только такие
+        # skip'ы и ни одного реального применения — файл помечаем already-applied.
+        applied_skips = 0
         while i < len(lines) - 1 and not lines[i].startswith("*** "):
             if lines[i].startswith("@@"):
                 i += 1
@@ -311,13 +488,29 @@ class PatchParser:
                 elif marker == "+":
                     new_lines.append(content)
                 else:
-                    raise ValueError(f"invalid hunk line: {lines[i]}")
+                    # Self-healing для ошибок формата строки hunk: несем модели
+                    # саму проблемную строку, её номер в патче и excerpt файла,
+                    # чтобы она видела, что именно поправить (а не абстрактный
+                    # hint), и перестраивала hunk, а не падала в write_file.
+                    raise PatchHunkLine(
+                        f"invalid hunk line: {lines[i]}",
+                        bad_line=lines[i],
+                        bad_line_number=i + 1,
+                        current=current,
+                        old_lines=old_lines,
+                    )
                 i += 1
             if not old_lines and not new_lines:
                 raise ValueError("empty update hunk")
             if not old_lines:
                 raise ValueError("update hunk must include context or removed lines")
             matches = self._find_hunk_matches(current, old_lines)
+            if not matches and new_lines and self._find_hunk_matches(current, new_lines):
+                # Idempotency: old_lines не нашлись, но new_lines уже лежат в
+                # файле дословно — hunk был применён ранее. Пропускаем его, не
+                # падаем в цикл «патчу одно и то же».
+                applied_skips += 1
+                continue
             if len(matches) != 1:
                 # Self-healing: несём модели актуальный фрагмент файла вокруг
                 # точки несовпадения, чтобы она перестроила hunks из реальных
@@ -335,6 +528,15 @@ class PatchParser:
                 )
             current = self._apply_matched_hunk(current, matches[0], old_lines, new_lines)
             saw_hunk = True
+        if applied_skips and not saw_hunk:
+            # Все hunks этого файла уже лежат в файле дословно — повторно
+            # применённый патч. Файл не трогаем, помечаем путь как already-applied.
+            # Move с уже-применённым содержимым не поддерживаем: это неоднозначно.
+            if target_path is not None:
+                raise ValueError(f"already-applied update cannot move file: {raw}")
+            already_applied.add(path)
+            changes[path] = original
+            return i
         if not saw_hunk and target_path is None:
             raise ValueError(f"update has no hunks: {raw}")
         if saw_hunk:
@@ -384,10 +586,28 @@ If apply_patch fails, use read_file or search_code to get exact current file tex
 and retry with verbatim context. Do not switch to write_file or run_shell scripts
 for precise edits.
 
+Blank lines inside a hunk are the #1 cause of apply_patch failures. Every line in
+an update hunk MUST start with a marker: one space (context), '-' (removed) or '+'
+(added). A truly empty line — no leading space at all — is a PARSE ERROR, even if
+the line in the file is empty. So a blank context line is written as a single
+space character, never as an empty line:
+  valid:   " "   (one space — blank context line)
+  INVALID: ""    (zero characters — parse error)
+The same applies to blank added lines ("+") and blank removed lines ("-").
+
 Prefer apply_patch over write_file for ANY change to an existing file. A targeted
 patch is roughly 10x cheaper in tokens than rewriting the whole file, and it keeps
 the context window clean. write_file bloats the window with the full new file text,
 which accumulates across edits and crowds out evidence — prefer the small patch.
+
+One patch = one logical change. If you need several independent edits to the same
+file, split them into separate apply_patch calls. Long multi-hunk patches are where
+models lose the structure (dangling '+}', stray '+', forgotten *** End Patch) —
+keep each patch small and self-contained.
+
+Idempotency: if you re-send a hunk that is already in the file, apply_patch does
+NOT fail — it reports the file as already_applied in the observation. Use this as
+a signal to stop retrying the same change, not as an error.
 
 Self-healing on mismatch: when an update hunk does not match the current file, the
 observation includes current_excerpt with the actual file region (with line numbers)
@@ -402,8 +622,10 @@ current_excerpt for the first two cases — use it instead of re-reading):
   preserving leading spaces, and retry.
 - "expected 1 hunk match, found 2": context matched more than one place. Add a few
   more surrounding context lines copied from current_excerpt to make it unique.
-- "invalid hunk line:": a blank line in the hunk has no marker. Even blank context
-  lines must start with a single space.
+- "invalid hunk line:": a line in the hunk has no marker. The observation shows
+  the offending line as bad_line and its patch line number as bad_line_number, and
+  attaches current_excerpt (the actual file region). The usual cause is a blank
+  context line with no leading space — rewrite it as a single space and retry.
 - "Move to is only supported after Update File": put "*** Move to:" on the line
   immediately after "*** Update File:", before any @@ hunks.
 - "patch must start with *** Begin Patch" or "unexpected patch line": send only the
@@ -441,7 +663,8 @@ Compact valid example:
 On failure: reread the current file region with read_file/search_code, copy exact
 current lines into the hunk, and retry apply_patch once. Remember that blank
 context lines must still start with one space — a truly empty line is a parse
-error.
+error. To preserve a blank line that exists in the file, write it as " " (one
+space) in context, or "+" in an added block — never as a zero-character line.
 """
 
 APPLY_PATCH_SPEC = ToolSpec(
