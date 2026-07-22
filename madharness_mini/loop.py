@@ -11,7 +11,7 @@ from .tools import ToolRegistry
 from .trace import Trace
 from .utils import fail, parse_tool_args
 
-# При 429 ждём Retry-After, но не дольше этой границы (секунды).
+# При 429 ждем Retry-After, но не дольше заданной границы в секундах
 RATE_LIMIT_RETRY_MAX_SECONDS = 60
 
 
@@ -24,8 +24,11 @@ def base_messages(cfg: Config, task: str) -> list[dict[str, Any]]:
     system = load_prompt("system")
     project_instructions = load_project_instructions(cfg)
     if project_instructions:
-        system = f"{system}\n\n# Project instructions\n\n{project_instructions}"
-    return [{"role": "system", "content": system}, {"role": "user", "content": task}]
+        system += f"\n\n# Project instructions\n\n{project_instructions}"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": task},
+    ]
 
 
 def call_model_with_rate_limit_retry(
@@ -35,16 +38,17 @@ def call_model_with_rate_limit_retry(
     tools: list[dict[str, Any]] | None = None,
     **trace_data: Any,
 ) -> dict[str, Any]:
-    """Зовём модель; при коротком 429 один раз ждём и повторяем запрос.
-
-    Длинный Retry-After пробрасываем наверх — пользователь увидит ошибку в CLI.
-    """
+    """Функция для обращения к LLM с учетом перехвата 429 ошибки
+    и повторной отправки сообщений через заданное количество секунд"""
 
     try:
         return client.chat(messages, tools)
     except ModelRateLimitError as exc:
         wait_seconds = exc.retry_after_seconds
-        if wait_seconds is not None and 0 < wait_seconds <= RATE_LIMIT_RETRY_MAX_SECONDS:
+        if (
+            wait_seconds is not None
+            and 0 < wait_seconds <= RATE_LIMIT_RETRY_MAX_SECONDS
+        ):
             trace.write(
                 "model_rate_limit_retry",
                 **trace_data,
@@ -57,6 +61,36 @@ def call_model_with_rate_limit_retry(
         raise
 
 
+def strip_sent_images(messages: list[dict[str, Any]]) -> None:
+    """Заменяет уже отправленные base64-изображения на текстовую заглушку.
+
+    Картинка нужна модели только в первом запросе после read_image; дальше
+    держать её в истории дорого. Вызывается сразу после обращения к модели,
+    поэтому изображение реально уходит в API ровно один раз, а последующие
+    ходы шлют лишь лёгкую пометку.
+    """
+
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        replaced = False
+        new_content: list[Any] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                new_content.append(
+                    {
+                        "type": "text",
+                        "text": "[image omitted from history after first send]",
+                    }
+                )
+                replaced = True
+            else:
+                new_content.append(part)
+        if replaced:
+            message["content"] = new_content
+
+
 def ask(task: str, cfg: Config) -> tuple[str, Any]:
     """Один запрос к модели без инструментов; пишем трассу в JSONL.
 
@@ -67,7 +101,11 @@ def ask(task: str, cfg: Config) -> tuple[str, Any]:
     messages = base_messages(cfg, task)
     trace.write("model_call_started", tools_count=0)
     try:
-        raw = call_model_with_rate_limit_retry(ModelClient(cfg), trace, messages)
+        raw = call_model_with_rate_limit_retry(
+            ModelClient(cfg),
+            trace,
+            messages,
+        )
     except RuntimeError as exc:
         trace.write("model_error", error=str(exc))
         trace.write("session_end", result=f"error: {exc}")
@@ -90,15 +128,26 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
     tools_registry = ToolRegistry(cfg)
     messages = base_messages(cfg, task)
     for turn in range(int(cfg.data["max_turns"])):
-        trace.write("model_call_started", turn=turn, tools_count=len(tools_registry.tools))
+        trace.write(
+            "model_call_started",
+            turn=turn,
+            tools_count=len(tools_registry.tools),
+        )
         try:
             raw = call_model_with_rate_limit_retry(
-                client, trace, messages, tools_registry.schemas(), turn=turn
+                client,
+                trace,
+                messages,
+                tools_registry.schemas(),
+                turn=turn,
             )
         except RuntimeError as exc:
             trace.write("model_error", turn=turn, error=str(exc))
             trace.write("session_end", result=f"error: {exc}")
             raise
+        # Модель уже получила текущую историю (включая картинку, если она была
+        # прикреплена на прошлом ходу), поэтому base64 можно удешевить до заглушки.
+        strip_sent_images(messages)
         message = raw["choices"][0]["message"]
         trace.write("model_call_finished", turn=turn, message=message)
         messages.append(message)
@@ -116,7 +165,12 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
                 name, args = "tool_call", {}
                 obs = fail(name, f"invalid tool call: {exc}")
             followup_messages.extend(obs.pop("_followup_messages", []))
-            trace.write("tool_observation", tool=name, args=args, observation=obs)
+            trace.write(
+                "tool_observation",
+                tool=name,
+                args=args,
+                observation=obs,
+            )
             content = json.dumps(obs, ensure_ascii=False)
             messages.append(
                 {
