@@ -98,6 +98,9 @@ def run_model_loop(
             trace.write("session_end", result=f"error: {exc}")
             emit_session_error(hooks, kind, exc, turn=turn)
             raise
+        # Запрос ушёл в API: тяжёлые вложения (base64-картинки) уже получены,
+        # поэтому в следующих ходах держим лишь текстовую заглушку.
+        context.mark_request_sent()
         message = raw["choices"][0]["message"]
         trace.write("model_call_finished", turn=turn, message=message)
         emit_hook(
