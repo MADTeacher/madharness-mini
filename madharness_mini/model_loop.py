@@ -82,6 +82,9 @@ def run_model_loop(
             trace.write("model_error", turn=turn, error=str(exc))
             trace.write("session_end", result=f"error: {exc}")
             raise
+        # Запрос ушёл в API: тяжёлые вложения (base64-картинки) уже получены,
+        # поэтому в следующих ходах держим лишь текстовую заглушку.
+        context.mark_request_sent()
         message = raw["choices"][0]["message"]
         trace.write("model_call_finished", turn=turn, message=message)
         context.record_assistant(message)
