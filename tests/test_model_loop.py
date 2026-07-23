@@ -248,6 +248,66 @@ class ModelLoopTests(HarnessTestCase):
         self.assertNotIn("data:image", trace_text)
         self.assertNotIn("base64", trace_text)
 
+    def test_run_agent_strips_image_from_history_after_first_send(self):
+        cfg = self.make_cfg()
+        cfg.data["supports_image_input"] = True
+        (cfg.root / "shot.png").write_bytes(PNG_BYTES)
+        seen_messages = []
+
+        def fake_chat(messages, tools=None):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            if len(seen_messages) == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "function": {
+                                            "name": "read_image",
+                                            "arguments": json.dumps({"path": "shot.png"}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            if len(seen_messages) == 2:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_2",
+                                        "function": {
+                                            "name": "list_files",
+                                            "arguments": json.dumps({"path": "."}),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": "done"}}]}
+
+        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+            result, _ = run_agent("inspect screenshot", cfg)
+
+        self.assertEqual(result, "done")
+        # Ход 2 (индекс 1) — первая и единственная отправка base64 картинки.
+        self.assertIn("data:image/png;base64,", json.dumps(seen_messages[1]))
+        # Ход 3 (индекс 2) — картинка уже отправлена, остаётся лишь заглушка.
+        third_request = json.dumps(seen_messages[2])
+        self.assertNotIn("data:image", third_request)
+        self.assertNotIn("base64", third_request)
+        self.assertIn("image omitted from history after first send", third_request)
+
     def test_run_agent_trims_large_tool_output_before_next_model_call(self):
         cfg = self.make_cfg()
         cfg.data["context_max_tokens"] = 4000
