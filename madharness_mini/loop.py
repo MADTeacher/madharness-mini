@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-# Держим импорт `time` живым: старые тесты и внешние harness-патчи подменяют
-# `loop.time.sleep`. Модуль `time` общий для процесса, поэтому retry в
-# `model_loop` увидит подмену, хотя сам `time.sleep` вызывается уже там.
-import time  # noqa: F401
 from typing import Any
 
 from .config import Config
