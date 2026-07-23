@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import time
+# Держим импорт `time` живым: старые тесты и внешние harness-патчи подменяют
+# `loop.time.sleep`. Модуль `time` общий для процесса, поэтому retry в
+# `model_loop` увидит подмену, хотя сам `time.sleep` вызывается уже там.
+import time  # noqa: F401
 from typing import Any
 
 from .config import Config
@@ -24,10 +27,6 @@ from .skills import (
 )
 from .tools import ToolRegistry
 from .trace import Trace
-
-# Старые тесты и внешние harness-патчи могут подменять `loop.time.sleep`;
-# модуль `time` общий для Python-процесса, поэтому retry в `model_loop` это увидит.
-_SLEEP_PATCH_COMPAT = time
 
 
 def ask(task: str, cfg: Config) -> tuple[str, Any]:

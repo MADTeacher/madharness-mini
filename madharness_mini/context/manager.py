@@ -200,6 +200,20 @@ class ContextManager:
             )
         return messages
 
+    def mark_request_sent(self) -> None:
+        """Фиксируем, что собранный контекст реально ушёл модели.
+
+        Явный «commit»-момент, аналог прежнего strip_sent_images: после отправки
+        тяжёлые вложения (base64-картинки) в истории больше не пересобираются в
+        полный вид, а рендерятся как лёгкая текстовая пометка. Loop вызывает
+        метод сразу после успешного обращения к модели.
+        """
+
+        for entry in self._history:
+            entry.sent = True
+        self._last_stats = None
+        self._last_report = None
+
     def stats(self) -> dict[str, int | bool]:
         """Короткая диагностика последней сборки контекста."""
 
