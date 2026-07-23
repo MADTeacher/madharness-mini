@@ -85,8 +85,8 @@ class ModelLoopTests(HarnessTestCase):
         raw = {"choices": [{"message": {"content": "ok"}}]}
 
         with (
-            patch("madharness_mini.loop.ModelClient.chat", side_effect=[rate_limit, raw]),
-            patch("madharness_mini.loop.time.sleep") as sleep,
+            patch("madharness_mini.model_loop.ModelClient.chat", side_effect=[rate_limit, raw]),
+            patch("madharness_mini.model_loop.time.sleep") as sleep,
         ):
             result, trace_path = ask("hello", cfg)
 
@@ -108,8 +108,8 @@ class ModelLoopTests(HarnessTestCase):
         )
 
         with (
-            patch("madharness_mini.loop.ModelClient.chat", side_effect=rate_limit),
-            patch("madharness_mini.loop.time.sleep") as sleep,
+            patch("madharness_mini.model_loop.ModelClient.chat", side_effect=rate_limit),
+            patch("madharness_mini.model_loop.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(RuntimeError, "достигнут лимит LLM API"):
                 ask("hello", cfg)
@@ -132,8 +132,8 @@ class ModelLoopTests(HarnessTestCase):
         )
 
         with (
-            patch("madharness_mini.loop.ModelClient.chat", side_effect=[first, second]),
-            patch("madharness_mini.loop.time.sleep") as sleep,
+            patch("madharness_mini.model_loop.ModelClient.chat", side_effect=[first, second]),
+            patch("madharness_mini.model_loop.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(RuntimeError, "достигнут лимит LLM API"):
                 ask("hello", cfg)
@@ -144,7 +144,7 @@ class ModelLoopTests(HarnessTestCase):
         cfg = self.make_cfg()
         raw = {"choices": [{"message": {"content": "ok"}}]}
 
-        with patch("madharness_mini.loop.ModelClient.chat", return_value=raw):
+        with patch("madharness_mini.model_loop.ModelClient.chat", return_value=raw):
             result, trace_path = ask("hello", cfg)
 
         self.assertEqual(result, "ok")
@@ -190,7 +190,7 @@ class ModelLoopTests(HarnessTestCase):
                 }
             return {"choices": [{"message": {"content": "done"}}]}
 
-        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+        with patch("madharness_mini.model_loop.ModelClient.chat", side_effect=fake_chat):
             result, trace_path = run_agent("inspect screenshot", cfg)
 
         self.assertEqual(result, "done")
@@ -230,7 +230,7 @@ class ModelLoopTests(HarnessTestCase):
                 }
             return {"choices": [{"message": {"content": "done"}}]}
 
-        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+        with patch("madharness_mini.model_loop.ModelClient.chat", side_effect=fake_chat):
             result, trace_path = run_agent("inspect screenshot", cfg)
 
         self.assertEqual(result, "done")
@@ -296,7 +296,7 @@ class ModelLoopTests(HarnessTestCase):
                 }
             return {"choices": [{"message": {"content": "done"}}]}
 
-        with patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat):
+        with patch("madharness_mini.model_loop.ModelClient.chat", side_effect=fake_chat):
             result, _ = run_agent("inspect screenshot", cfg)
 
         self.assertEqual(result, "done")
@@ -338,9 +338,9 @@ class ModelLoopTests(HarnessTestCase):
             return {"choices": [{"message": {"content": "done"}}]}
 
         with (
-            patch("madharness_mini.loop.ModelClient.chat", side_effect=fake_chat),
+            patch("madharness_mini.model_loop.ModelClient.chat", side_effect=fake_chat),
             patch(
-                "madharness_mini.loop.ToolRegistry.call",
+                "madharness_mini.model_loop.ToolRegistry.call",
                 return_value={
                     "ok": True,
                     "tool": "run_shell",

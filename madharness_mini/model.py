@@ -88,7 +88,7 @@ class ModelClient:
 
         Без api_key — RuntimeError с подсказкой про init/env.
         При HTTP-ошибке тело ответа попадает в текст исключения для CLI и трассы.
-        429 выделяем в ModelRateLimitError для повтора в loop.py.
+        429 выделяем в ModelRateLimitError для повтора в model_loop.py.
         """
 
         settings = self.settings()
