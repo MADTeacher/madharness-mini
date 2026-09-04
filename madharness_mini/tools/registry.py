@@ -30,7 +30,10 @@ class ToolRegistry:
         self.cfg = cfg
         self.policy = Policy(cfg)
         self.context = ToolContext(cfg, self.policy, trace, skill_runtime)
-        self.providers = [BuiltinToolProvider(), *list(providers or [])]
+        self.providers = [
+            BuiltinToolProvider(),
+            *list(providers or []),
+        ]
         self.tools = {}
         for provider in self.providers:
             # получаем список ToolSpec от каждого provider

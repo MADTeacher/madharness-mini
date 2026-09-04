@@ -1,4 +1,4 @@
-"""Поддержка проектных Agent Skills без внешних зависимостей."""
+"""Публичное API пакета"""
 
 from .activation import SkillRuntime
 from .catalog import ExplicitSkillSelection, find_explicit_skill_selection

@@ -66,8 +66,11 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.cmd == "init":
             api_key = args.api_key
-            if api_key is None and not cfg.data.get("api_key") and not args.no_prompt:
-                if sys.stdin.isatty():
+            if (
+                api_key is None
+                and not cfg.data.get("api_key")
+                and not args.no_prompt
+            ) and sys.stdin.isatty():
                     value = getpass.getpass(api_key_prompt(cfg))
                     api_key = value or None
             path, changes = cfg.initialize(
@@ -114,8 +117,7 @@ def skills_command(cfg: Config, command: str, name: str = "") -> str:
         for skill_name in index.names():
             skill = index.skills[skill_name]
             lines.append(
-                f"- {skill.name}: {skill.description} "
-                f"({skill.location(cfg.root)})"
+                f"- {skill.name}: {skill.description} ({skill.location(cfg.root)})"
             )
         return "\n".join(lines)
     if command == "show":
@@ -154,12 +156,8 @@ def skills_command(cfg: Config, command: str, name: str = "") -> str:
         lines = [f"skills: {len(index.skills)}"]
         for diagnostic in index.diagnostics:
             item = diagnostic.as_dict(cfg.root)
-            lines.append(
-                f"{item['severity']}: {item['path']}: {item['message']}"
-            )
-        errors = [
-            item for item in index.diagnostics if item.severity == "error"
-        ]
+            lines.append(f"{item['severity']}: {item['path']}: {item['message']}")
+        errors = [item for item in index.diagnostics if item.severity == "error"]
         if errors:
             lines.append(f"errors: {len(errors)}")
         else:

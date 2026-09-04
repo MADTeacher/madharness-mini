@@ -10,7 +10,8 @@ from .specs import ToolSpec
 
 
 def run_shell(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """Выполняем одну команду в workspace или подкаталоге после проверки Policy."""
+    """Выполняем одну команду в workspace или подкаталоге после 
+    проверки политик безопасности."""
 
     command = args["command"]
     allowed, reason = ctx.policy.shell_allowed(command)
@@ -19,13 +20,25 @@ def run_shell(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     cwd_raw = args.get("cwd", ".")
     cwd, err = ctx.policy.safe_path(cwd_raw)
     if err or not cwd:
-        return fail("run_shell", err or f"invalid cwd: {cwd_raw}", command=command)
+        return fail(
+            "run_shell",
+            err or f"invalid cwd: {cwd_raw}",
+            command=command,
+        )
     if not cwd.is_dir():
-        return fail("run_shell", f"cwd is not a directory: {cwd_raw}", command=command)
+        return fail(
+            "run_shell",
+            f"cwd is not a directory: {cwd_raw}",
+            command=command,
+        )
     if ctx.trace and ctx.skill_runtime:
         event = ctx.skill_runtime.resource_event(cwd)
         if event:
-            ctx.trace.write("skill_resource_used", tool="run_shell", **event)
+            ctx.trace.write(
+                "skill_resource_used",
+                tool="run_shell",
+                **event,
+            )
     proc = subprocess.run(
         shlex.split(command),
         cwd=cwd,

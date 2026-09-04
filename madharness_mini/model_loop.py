@@ -31,7 +31,10 @@ def call_model_with_rate_limit_retry(
         return client.chat(messages, tools)
     except ModelRateLimitError as exc:
         wait_seconds = exc.retry_after_seconds
-        if wait_seconds is not None and 0 < wait_seconds <= RATE_LIMIT_RETRY_MAX_SECONDS:
+        if (
+            wait_seconds is not None
+            and 0 < wait_seconds <= RATE_LIMIT_RETRY_MAX_SECONDS
+        ):
             trace.write(
                 "model_rate_limit_retry",
                 **trace_data,
@@ -100,7 +103,12 @@ def run_model_loop(
                 obs = fail(name, f"invalid tool call: {exc}")
             followup_messages = obs.pop("_followup_messages", [])
             apply_hidden_observation_effects(context, trace, obs)
-            trace.write("tool_observation", tool=name, args=args, observation=obs)
+            trace.write(
+                "tool_observation",
+                tool=name,
+                args=args,
+                observation=obs,
+            )
             context.record_tool_result(call, obs, followup_messages)
     result = "Agent stopped: max_turns exceeded."
     trace.write("session_end", result=result)
@@ -115,9 +123,11 @@ def apply_hidden_observation_effects(
     """Применяем служебные эффекты tool observation, не отправляя их модели."""
 
     fragments = observation.pop("_context_fragments", [])
+    # Добавляем фрагменты с активными навыками в контекст
     for fragment in fragments:
         context.add_fragment(fragment)
     skill_event = observation.pop("_skill_event", None)
+    # Если была активирован навык, пишем событие в trace
     if skill_event:
         trace.write("skill_activated", **skill_event)
 

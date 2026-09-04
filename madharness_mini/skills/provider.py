@@ -5,16 +5,16 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..context import ContextFragment, ContextState
-from ..utils import obj
 from ..tools.context import ToolContext
 from ..tools.specs import ToolSpec
+from ..utils import obj
 from .activation import SkillRuntime
 from .catalog import render_skill_catalog_for_root
 from .types import SkillIndex
 
 
 class SkillCatalogProvider:
-    """Добавляет в `run` компактный каталог навыков без полной загрузки инструкций."""
+    """Добавляет в run компактный каталог навыков без полной загрузки инструкций."""
 
     def __init__(self, index: SkillIndex, workspace_root):
         self.index = index
@@ -39,7 +39,7 @@ class SkillCatalogProvider:
 
 
 class SkillToolProvider:
-    """Даёт модели инструмент `activate_skill` с enum найденных имён."""
+    """Дает модели инструмент `activate_skill` с enum найденных имен."""
 
     def __init__(self, runtime: SkillRuntime):
         self.runtime = runtime
@@ -53,13 +53,17 @@ class SkillToolProvider:
         return [
             ToolSpec(
                 "activate_skill",
-                "Activate one available Agent Skill by exact name. The harness adds the skill instructions to durable context and returns the skill root plus bundled resource list.",
+                "Activate one available Agent Skill by exact name. "
+                "The harness adds the skill instructions to durable "
+                "context and returns the skill root plus bundled "
+                "resource list.",
                 obj(
                     {
                         "name": {
                             "type": "string",
                             "enum": names,
-                            "description": "Exact skill name from the available Agent Skills catalog.",
+                            "description": "Exact skill name from the "
+                            "available Agent Skills catalog.",
                         }
                     },
                     ["name"],
@@ -69,6 +73,6 @@ class SkillToolProvider:
         ]
 
     def activate_skill(self, ctx: ToolContext, args: dict) -> dict:
-        """Handler инструмента: активация идёт через runtime текущего run."""
+        """Handler инструмента: активация идет через runtime режима run."""
 
         return self.runtime.activate(str(args.get("name") or ""), "tool")

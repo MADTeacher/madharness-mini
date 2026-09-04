@@ -25,9 +25,9 @@ NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 def discover_skills(cfg: Config) -> SkillIndex:
     """Сканируем прямые подпапки skill-каталогов внутри workspace.
 
-    Нативный каталог `.madharness_mini/skills` перекрывает `.agents/skills` при
-    совпадении `name`. Ошибки отдельных навыков не валят запуск целиком: они
-    попадают в диагностику и доступны через CLI `skills validate`.
+    Нативный каталог .madharness_mini/skills перекрывает .agents/skills при
+    совпадении name. Ошибки отдельных навыков не валят запуск целиком: они
+    попадают в диагностику и доступны через CLI посредством команды skills validate.
     """
 
     policy = Policy(cfg)
@@ -38,14 +38,22 @@ def discover_skills(cfg: Config) -> SkillIndex:
         root, err = policy.skill_root(raw_root)
         if err or root is None:
             diagnostics.append(
-                SkillDiagnostic("error", cfg.root / raw_root, err or "invalid skill root")
+                SkillDiagnostic(
+                    "error",
+                    cfg.root / raw_root,
+                    err or "invalid skill root",
+                )
             )
             continue
         if not root.exists():
             continue
         if not root.is_dir():
             diagnostics.append(
-                SkillDiagnostic("error", root, "skill root is not a directory")
+                SkillDiagnostic(
+                    "error",
+                    root,
+                    "skill root is not a directory",
+                )
             )
             continue
         for child in sorted(path for path in root.iterdir() if path.is_dir()):
@@ -79,29 +87,60 @@ def discover_skills(cfg: Config) -> SkillIndex:
     )
 
 
-def load_skill(root: Path, workspace_root: Path, source: str) -> tuple[Skill | None, list[SkillDiagnostic]]:
+def load_skill(
+    root: Path, workspace_root: Path, source: str
+) -> tuple[Skill | None, list[SkillDiagnostic]]:
     """Читаем один skill-каталог и возвращаем Skill либо понятную диагностику."""
 
+    # список диагностик для возврата
     diagnostics: list[SkillDiagnostic] = []
+    # абсолютный путь к корневой директории навыка
     resolved_root = root.resolve()
+    # проверяем, что корневая директория навыка находится внутри workspace
     try:
         resolved_root.relative_to(workspace_root)
     except ValueError:
-        return None, [SkillDiagnostic("error", root, "skill directory escapes workspace")]
+        return None, [
+            SkillDiagnostic(
+                "error",
+                root,
+                "skill directory escapes workspace",
+            ),
+        ]
+    # абсолютный путь к файлу навыка
     skill_file = root / "SKILL.md"
+    # проверяем, что файл навыка существует
     if not skill_file.exists():
         return None, diagnostics
     if not skill_file.is_file():
-        return None, [SkillDiagnostic("error", skill_file, "SKILL.md is not a file")]
+        return None, [
+            SkillDiagnostic("error", skill_file, "SKILL.md is not a file"),
+        ]
+
+    # абсолютный путь к файлу навыка
     resolved_skill_file = skill_file.resolve()
+    # проверяем, что файл навыка находится внутри корневой директории навыка
     try:
         resolved_skill_file.relative_to(resolved_root)
     except ValueError:
-        return None, [SkillDiagnostic("error", skill_file, "SKILL.md escapes skill root")]
+        return None, [
+            SkillDiagnostic(
+                "error",
+                skill_file,
+                "SKILL.md escapes skill root",
+            ),
+        ]
+    # проверяем, что файл навыка не слишком большой
     try:
         size = resolved_skill_file.stat().st_size
     except OSError as exc:
-        return None, [SkillDiagnostic("error", skill_file, f"cannot stat SKILL.md: {exc}")]
+        return None, [
+            SkillDiagnostic(
+                "error",
+                skill_file,
+                f"cannot stat SKILL.md: {exc}",
+            ),
+        ]
     if size > MAX_SKILL_FILE_BYTES:
         return None, [
             SkillDiagnostic(
@@ -110,6 +149,8 @@ def load_skill(root: Path, workspace_root: Path, source: str) -> tuple[Skill | N
                 f"SKILL.md is too large: {size} bytes, limit is {MAX_SKILL_FILE_BYTES}",
             )
         ]
+
+    # разбираем файл навыка на frontmatter и body
     try:
         raw_text = resolved_skill_file.read_text(encoding="utf-8", errors="replace")
         fields, body = parse_skill_markdown(raw_text)
@@ -119,18 +160,36 @@ def load_skill(root: Path, workspace_root: Path, source: str) -> tuple[Skill | N
     name = _scalar(fields.get("name", ""))
     description = _scalar(fields.get("description", ""))
     if not name:
-        diagnostics.append(SkillDiagnostic("error", skill_file, "missing required name"))
+        diagnostics.append(
+            SkillDiagnostic(
+                "error",
+                skill_file,
+                "missing required name",
+            )
+        )
     elif not valid_skill_name(name):
         diagnostics.append(
-            SkillDiagnostic("error", skill_file, f"invalid skill name: {name}")
+            SkillDiagnostic(
+                "error",
+                skill_file,
+                f"invalid skill name: {name}",
+            )
         )
     if not description:
         diagnostics.append(
-            SkillDiagnostic("error", skill_file, "missing required description")
+            SkillDiagnostic(
+                "error",
+                skill_file,
+                "missing required description",
+            )
         )
     elif len(description) > 1024:
         diagnostics.append(
-            SkillDiagnostic("warning", skill_file, "description is longer than 1024 characters")
+            SkillDiagnostic(
+                "warning",
+                skill_file,
+                "description is longer than 1024 characters",
+            )
         )
     if any(item.severity == "error" for item in diagnostics):
         return None, diagnostics
@@ -144,8 +203,14 @@ def load_skill(root: Path, workspace_root: Path, source: str) -> tuple[Skill | N
     compatibility = _scalar(fields.get("compatibility", ""))
     if compatibility and len(compatibility) > 500:
         diagnostics.append(
-            SkillDiagnostic("warning", skill_file, "compatibility is longer than 500 characters")
+            SkillDiagnostic(
+                "warning",
+                skill_file,
+                "compatibility is longer than 500 characters",
+            )
         )
+
+    # создаем объект навыка
     skill = Skill(
         name=name,
         description=description,
@@ -157,7 +222,11 @@ def load_skill(root: Path, workspace_root: Path, source: str) -> tuple[Skill | N
         license=_scalar(fields.get("license", "")),
         compatibility=compatibility,
         metadata=_metadata(fields.get("metadata")),
-        allowed_tools=tuple(_scalar(fields.get("allowed-tools", "")).split()),
+        allowed_tools=tuple(
+            _scalar(
+                fields.get("allowed-tools", ""),
+            ).split()
+        ),
         warnings=tuple(warnings),
     )
     return skill, diagnostics
@@ -169,7 +238,9 @@ def parse_skill_markdown(text: str) -> tuple[dict[str, Any], str]:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         raise ValueError("SKILL.md must start with YAML frontmatter")
-    closing = next((index for index in range(1, len(lines)) if lines[index].strip() == "---"), None)
+    closing = next(
+        (index for index in range(1, len(lines)) if lines[index].strip() == "---"), None
+    )
     if closing is None:
         raise ValueError("SKILL.md frontmatter is not closed")
     fields = parse_frontmatter_lines(lines[1:closing])
@@ -188,7 +259,9 @@ def parse_frontmatter_lines(lines: list[str]) -> dict[str, Any]:
             index += 1
             continue
         if raw[:1].isspace():
-            raise ValueError(f"unexpected indented frontmatter line: {raw.strip()}")
+            raise ValueError(
+                f"unexpected indented frontmatter line: {raw.strip()}",
+            )
         if ":" not in raw:
             raise ValueError(f"invalid frontmatter line: {raw.strip()}")
         key, value = raw.split(":", 1)
@@ -197,7 +270,11 @@ def parse_frontmatter_lines(lines: list[str]) -> dict[str, Any]:
         if not key:
             raise ValueError("empty frontmatter key")
         if value in {"|", "|-", "|+", ">", ">-", ">+"}:
-            block, index = _read_block_scalar(lines, index + 1, folded=value.startswith(">"))
+            block, index = _read_block_scalar(
+                lines,
+                index + 1,
+                folded=value.startswith(">"),
+            )
             fields[key] = block
             continue
         if key == "metadata" and not value:
@@ -215,7 +292,9 @@ def valid_skill_name(name: str) -> bool:
     return bool(NAME_RE.fullmatch(name)) and "--" not in name
 
 
-def _read_block_scalar(lines: list[str], index: int, *, folded: bool) -> tuple[str, int]:
+def _read_block_scalar(
+    lines: list[str], index: int, *, folded: bool
+) -> tuple[str, int]:
     """Читаем простейший YAML block scalar, сохраняя достаточную совместимость."""
 
     collected: list[str] = []

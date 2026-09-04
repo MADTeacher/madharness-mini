@@ -50,9 +50,6 @@ class Policy:
         """Проверяем фиксированный каталог навыков внутри workspace.
 
         Discovery читает только `.madharness_mini/skills` и `.agents/skills`.
-        Эти каталоги не проходят через protected_paths: они не являются целями
-        пользовательских файловых инструментов, но всё равно обязаны оставаться
-        внутри workspace_root.
         """
 
         path = (self.root / raw).resolve()

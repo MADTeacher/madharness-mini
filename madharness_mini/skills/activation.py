@@ -1,4 +1,4 @@
-"""Активация навыков: durable context-фрагмент и список bundled resources."""
+"""Активация навыков: создание фрагмента контекста и списка bundled resources."""
 
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ class SkillRuntime:
         self.active_names: set[str] = set()
 
     def activate(self, name: str, trigger: str) -> dict[str, Any]:
-        """Активируем навык один раз и возвращаем observation с hidden context fragment."""
+        """Активируем навык один раз и возвращаем observation с фрагментом контекста, 
+        защищенным от компактификации и вытеснения, 
+        часть данных которого спрятана от модели и используется
+        самим харнессом для отслеживания активных навыков и ресурсов."""
 
         skill = self.index.skills.get(name)
         if skill is None:
@@ -33,8 +36,13 @@ class SkillRuntime:
                 "summary": f"unknown skill: {name}",
                 "name": name,
             }
+
+        # Получаем список ресурсов навыка
         resources = list_skill_resources(skill, self.cfg.root)
         resource_dicts = [item.as_dict() for item in resources]
+
+        # Если навык уже активирован, возвращаем observation 
+        # с информацией об этом и без фрагмента контекста
         if name in self.active_names:
             return ok(
                 "activate_skill",
@@ -45,6 +53,8 @@ class SkillRuntime:
                 resources=resource_dicts,
             )
 
+        # Если навык не активирован, активируем его и возвращаем observation 
+        # с фрагментом контекста
         self.active_names.add(name)
         fragment = activation_fragment(skill, self.cfg.root, resources)
         observation = ok(
@@ -56,7 +66,9 @@ class SkillRuntime:
             location=skill.location(self.cfg.root),
             resources=resource_dicts,
         )
+        # Добавляем фрагмент контекста в observation
         observation["_context_fragments"] = [fragment]
+        # Добавляем событие активации навыка в observation
         observation["_skill_event"] = {
             "name": name,
             "trigger": trigger,
@@ -66,7 +78,9 @@ class SkillRuntime:
         return observation
 
     def resource_event(self, path: Path) -> dict[str, str] | None:
-        """Если путь лежит внутри активного skill root, готовим событие трассы."""
+        """Если путь лежит внутри активного директории активированного навыка
+         – готовим событие трассы."""
+
 
         resolved = path.resolve()
         for name in sorted(self.active_names):
@@ -97,9 +111,12 @@ def activation_fragment(
     workspace_root: Path,
     resources: list[SkillResource] | None = None,
 ) -> ContextFragment:
-    """Упаковываем инструкции навыка в системный фрагмент, защищённый от compaction."""
+    """Упаковываем инструкции навыка в системный фрагмент, 
+    защищенный от от компактификации и вытеснения."""
 
-    resource_lines = _resource_lines(resources or list_skill_resources(skill, workspace_root))
+    resource_lines = _resource_lines(
+        resources or list_skill_resources(skill, workspace_root),
+    )
     parts = [
         f"# Active Agent Skill: {skill.name}",
         "",
@@ -117,7 +134,12 @@ def activation_fragment(
             + " ".join(skill.allowed_tools)
         )
     if skill.metadata:
-        metadata = ", ".join(f"{key}={value}" for key, value in sorted(skill.metadata.items()))
+        metadata = ", ".join(
+            f"{key}={value}"
+            for key, value in sorted(
+                skill.metadata.items(),
+            )
+        )
         parts.append(f"Metadata: {metadata}")
     parts.extend(
         [
@@ -143,8 +165,12 @@ def activation_fragment(
     )
 
 
-def list_skill_resources(skill: Skill, workspace_root: Path) -> list[SkillResource]:
-    """Перечисляем файлы внутри skill root, не раскрывая их содержимое."""
+def list_skill_resources(
+    skill: Skill,
+    workspace_root: Path,
+) -> list[SkillResource]:
+    """Перечисляем файлы внутри директории навыка, 
+    не раскрывая их содержимое."""
 
     resources: list[SkillResource] = []
     root = skill.root.resolve()

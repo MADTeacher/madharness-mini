@@ -9,14 +9,15 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SkillDiagnostic:
-    """Диагностика discovery: ошибка пропускает skill, предупреждение оставляет его доступным."""
+    """Состояние диагностики навыка: ошибка пропускает skill, 
+    предупреждение оставляет его доступным для использования."""
 
     severity: str
     path: Path
     message: str
 
     def as_dict(self, workspace_root: Path) -> dict[str, str]:
-        """Отдаём диагностику для CLI и трассы без абсолютного шума, если путь внутри workspace."""
+        """Отдаем диагностику для CLI и трассы """
 
         try:
             location = str(self.path.relative_to(workspace_root))
@@ -31,7 +32,8 @@ class SkillDiagnostic:
 
 @dataclass(frozen=True)
 class SkillResource:
-    """Один bundled-файл навыка, который модель может прочитать по требованию."""
+    """Один bundled-файл навыка, который модель может прочитать 
+    по требованию из workspace."""
 
     relative_path: str
     workspace_path: str
@@ -39,7 +41,8 @@ class SkillResource:
     bytes: int
 
     def as_dict(self) -> dict[str, Any]:
-        """Готовим JSON-совместимое описание ресурса для observation и CLI."""
+        """Готовим JSON-совместимое описание ресурса для observation 
+        и CLI. Название ресурса (kind) указывает на тип файла."""
 
         return {
             "path": self.relative_path,
@@ -51,23 +54,32 @@ class SkillResource:
 
 @dataclass(frozen=True)
 class Skill:
-    """Описание одного валидного `SKILL.md` и его project-local корня."""
+    """Описание одного валидного навыка"""
 
-    name: str
-    description: str
-    root: Path
-    skill_file: Path
-    body: str
-    raw_text: str
-    source: str
-    license: str = ""
-    compatibility: str = ""
+    name: str # имя навыка (например, `docs-writer`)
+
+    # короткое описание, по которому модель потом решает, 
+    # нужен навык или нет
+    description: str 
+    root: Path # корневая директория навыка
+    skill_file: Path # путь к файлу навыка (например, `SKILL.md`)
+    body: str # тело навыка (без форматтера)
+    raw_text: str # исходный текст навыка (с форматтером и телом)
+
+    # откуда навык: native (из .madharness_mini/skills) или 
+    # agents (из .agents/skills)
+    source: str 
+    license: str = "" # лицензия навыка (например, `MIT`)
+    compatibility: str = "" # требования окружения (например, `python 3.10`)
+    # метаданные навыка (например, `{"author": "Stasko", "version": "1.0"}`)
     metadata: dict[str, str] = field(default_factory=dict)
+    # кортеж инструментов, которые может использовать навык
     allowed_tools: tuple[str, ...] = ()
+    # кортеж предупреждений (например, о несовпадении имени с папкой)
     warnings: tuple[str, ...] = ()
 
     def location(self, workspace_root: Path) -> str:
-        """Показываем путь к `SKILL.md` так, как его сможет использовать модель."""
+        """Показываем путь к SKILL.md навыка относительно workspace."""
 
         try:
             return str(self.skill_file.relative_to(workspace_root))
@@ -75,7 +87,8 @@ class Skill:
             return str(self.skill_file)
 
     def root_location(self, workspace_root: Path) -> str:
-        """Показываем корень навыка относительно workspace для чтения ресурсов и cwd shell."""
+        """Показываем корневую директорию навыка относительно workspace 
+        для чтения ресурсов и вызова скриптов с помощью shell"""
 
         try:
             return str(self.root.relative_to(workspace_root))
@@ -85,12 +98,12 @@ class Skill:
 
 @dataclass(frozen=True)
 class SkillIndex:
-    """Результат discovery: доступные навыки и диагностика сканирования."""
+    """Доступные навыки и диагностика их обнаружения."""
 
-    skills: dict[str, Skill]
-    diagnostics: tuple[SkillDiagnostic, ...] = ()
+    skills: dict[str, Skill] # словарь навыков по именам
+    diagnostics: tuple[SkillDiagnostic, ...] = () # кортеж диагностик
 
     def names(self) -> list[str]:
-        """Возвращаем имена навыков в стабильном порядке для enum и CLI."""
+        """Возвращаем список имен навыков в отсортированном порядке"""
 
         return sorted(self.skills)

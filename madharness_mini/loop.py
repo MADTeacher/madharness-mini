@@ -65,6 +65,12 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
 
     trace = Trace(cfg, "run")
     client = ModelClient(cfg)
+
+    # Этап 1 – discovery: обнаружение навыков.
+    # Сканируем каталог навыков через discover_skills(cfg) и
+    # сразу пишем в трассу событие skills_discovered, содержащее
+    # количество найденных навыков, их имена и диагностику. Благодаря этому
+    # пользователь с самого начала видит, какие навыки нашел харнесс. 
     skill_index = discover_skills(cfg)
     trace.write(
         "skills_discovered",
@@ -74,6 +80,11 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
             diagnostic.as_dict(cfg.root) for diagnostic in skill_index.diagnostics
         ],
     )
+
+    # Этап 2 – разбор явного вызова навыка.
+    # Ищем в тексте задачи маркеры вроде @skill:docs-writer, 
+    # используй skill-name и т.д. Если нашлись неизвестные навыки – 
+    # сразу падаем с выбрасываем исключение с текстом «unknown skill». 
     explicit_skills = find_explicit_skill_selection(task, set(skill_index.skills))
     if explicit_skills.unknown:
         names = ", ".join(explicit_skills.unknown)
@@ -81,6 +92,15 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
         trace.write("session_end", result=result)
         raise RuntimeError(f"unknown skill: {names}")
 
+    # Этап 3 – сборка провайдеров.
+    # Здесь работает принцип «явный выбор сильнее автоматического».
+    # Если пользователь явно выбрал навык (explicit_skills.names не пусто),
+    # мы НЕ добавляем ни каталог (SkillCatalogProvider), ни инструмент
+    # activate_skill (SkillToolProvider), то есть авто-подбор моделью навыка
+    # отключен. Зачем модели что-то выбирать, если человек и так уже выбрал 
+    # то, что ему нужно? Если явного выбора не было – предоставляем агенту 
+    # каталог и инструмент для вызова навыков, чтобы модель могла сама
+    # активировать нужный навык по ходу работы.
     skill_runtime = SkillRuntime(cfg, skill_index)
     context_providers: list[ContextProvider] = []
     tool_providers = []
@@ -90,6 +110,11 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
         context_providers.append(SkillCatalogProvider(skill_index, cfg.root))
         tool_providers.append(SkillToolProvider(skill_runtime))
 
+    # Этап 4 – реестр и контекст.
+    # Создаем реестр инструментов ToolRegistry и передаем ему внешних
+    # провайдеров (tool_providers), трассу и skill_runtime. Затем собираем
+    # контекст диалога через base_context с провайдерами контекста
+    # (context_providers). 
     tools_registry = ToolRegistry(
         cfg,
         providers=tool_providers,
@@ -97,6 +122,12 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
         skill_runtime=skill_runtime,
     )
     context = base_context(cfg, task, providers=context_providers)
+
+    # Этап 5 – явная активация навыка.
+    # Если пользователь выбрал навыки явно, активируем их ДО первого
+    # model call и применяем скрытые эффекты через 
+    # apply_hidden_observation_effects. В противном случае  – 
+    # падаем с ошибкой.
     for name in explicit_skills.names:
         obs = skill_runtime.activate(name, "explicit")
         if not obs.get("ok"):
@@ -105,6 +136,9 @@ def run_agent(task: str, cfg: Config) -> tuple[str, Any]:
             raise RuntimeError(str(obs.get("summary")))
         apply_hidden_observation_effects(context, trace, obs)
 
+    # Этап 6 – запуск цикла.
+    # Передаем собранные зависимости в run_model_loop: клиента, трассу, 
+    # контекст, реестр инструментов и лимит ходов. 
     loop_result = run_model_loop(
         client,
         trace,
