@@ -7,8 +7,13 @@
 данными.
 
 Реализация намеренно минимальная: только stdio-транспорт, только MCP-инструменты
-и только стандартная библиотека Python. Основной `config.json` не меняется; MCP
-включается отдельным файлом `.madharness-mini/mcp.json`.
+и только стандартная библиотека Python. Клиент говорит только на актуальной
+stateless-ревизии протокола [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28):
+без `initialize`-handshake, с версией протокола и возможностями клиента в
+`_meta` каждого запроса. Серверы, требующие устаревшего `initialize`-handshake
+(ревизии 2025-11-25 и старше), не поддерживаются: запуск такого сервера
+завершается понятной ошибкой на пробе `server/discover`. Основной `config.json`
+не меняется; MCP включается отдельным файлом `.madharness-mini/mcp.json`.
 
 ## Быстрый пример
 
@@ -108,14 +113,21 @@ Playwright требует установленный браузер и част�
    запущен из каталога вне workspace.
 4. `StdioMcpClient` запускает subprocess без shell.
 5. Для stdout и stderr создаются отдельные потоки чтения.
-6. Клиент отправляет `initialize` с протоколом `2025-11-25`.
-7. Сервер должен вернуть тот же `protocolVersion`; иначе запуск считается
-   ошибочным.
-8. Клиент отправляет `notifications/initialized`.
-9. Клиент вызывает `tools/list`.
-10. Каждый MCP-инструмент превращается в локальный `ToolSpec`.
-11. `ToolRegistry` добавляет эти описания рядом со встроенными инструментами.
-12. Модель видит MCP-инструменты в обычном поле `tools` OpenAI-совместимого запроса.
+6. Клиент отправляет `server/discover`: проба stateless-протокола и запрос
+   поддерживаемых сервером версий.
+7. Сервер должен вернуть `supportedVersions`, содержащий `2026-07-28`; иначе
+   запуск считается ошибочным. Ошибка или молчание на пробе означают
+   legacy-сервер с `initialize`-handshake, который не поддерживается.
+8. Клиент вызывает `tools/list`.
+9. Каждый MCP-инструмент превращается в локальный `ToolSpec`.
+10. `ToolRegistry` добавляет эти описания рядом со встроенными инструментами.
+11. Модель видит MCP-инструменты в обычном поле `tools` OpenAI-совместимого запроса.
+
+Протокол stateless: handshake `initialize`/`notifications/initialized` в
+ревизии 2026-07-28 отсутствует. Вместо этого каждый запрос несёт в
+`params._meta` версию протокола (`io.modelcontextprotocol/protocolVersion`),
+возможности клиента (`io.modelcontextprotocol/clientCapabilities`) и его имя
+(`io.modelcontextprotocol/clientInfo`); клиент добавляет их автоматически.
 
 Если сервер не стартовал, вернул невалидный JSON, не ответил до таймаута или
 прислал некорректный `tools/list`, запуск `run` завершается понятной ошибкой.
@@ -159,7 +171,7 @@ mcp__<server_name>__<tool_name>
    трансформации.
 5. Ответ MCP преобразуется в observation харнесса.
 
-Пример MCP-запроса:
+Пример MCP-запроса (обязательный `_meta` клиент добавляет сам):
 
 ```json
 {
@@ -171,6 +183,14 @@ mcp__<server_name>__<tool_name>
     "arguments": {
       "url": "https://example.com",
       "max_length": 1000
+    },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "madharness-mini",
+        "version": "0.1.0"
+      },
+      "io.modelcontextprotocol/clientCapabilities": {}
     }
   }
 }
@@ -190,9 +210,14 @@ mcp__<server_name>__<tool_name>
 | Неизвестный тип content | Попадает в `diagnostics`. |
 
 Если MCP-сервер вернул `isError: true`, observation будет ошибочным
-`ok: false`, даже если JSON-RPC ответ технически успешен. Если ломается сам
-транспорт или JSON-RPC, `ToolRegistry.call()` ловит исключение и возвращает
-обычный ошибочный observation через `fail()`.
+`ok: false`, даже если JSON-RPC ответ технически успешен. Результат с
+`resultType: "input_required"` (multi round-trip запрос доп. ввода через
+elicitation, sampling или roots) также превращается в `ok: false`: харнесс
+не задаёт вопросов пользователю и не поддерживает эти клиентские возможности,
+поэтому в observation попадает явный отказ со списком запрошенных вводов в
+`requested_inputs`. Если ломается сам транспорт или JSON-RPC,
+`ToolRegistry.call()` ловит исключение и возвращает обычный ошибочный
+observation через `fail()`.
 
 ## Окружение и безопасность
 
@@ -218,7 +243,7 @@ MCP пишет отдельные события в JSONL-трассу:
 
 | Событие | Когда пишется | Поля |
 | --- | --- | --- |
-| `mcp_server_started` | Сервер прошёл `initialize` и `tools/list`. | `server`, `command`, `tools_count` |
+| `mcp_server_started` | Сервер прошёл `server/discover` и `tools/list`. | `server`, `command`, `tools_count` |
 | `mcp_server_error` | Сервер не смог стартовать или отдать инструменты. | `server`, `error` |
 | `mcp_server_stopped` | Провайдер закрывает subprocess. | `server`, `exit_code` |
 | `tool_observation` | Модель вызвала MCP-инструмент. | `tool`, `args`, `observation` |
@@ -245,20 +270,21 @@ MCP пишет отдельные события в JSONL-трассу:
 Поддерживаются:
 
 - stdio-транспорт;
-- `initialize`;
-- `notifications/initialized`;
+- `server/discover`;
+- per-request `_meta` stateless-протокола (версия, возможности и имя клиента);
 - `tools/list`;
 - `tools/call`;
-- базовая обработка server-to-client requests через ответ `Method not found`.
+- `resultType` результатов: `complete` и отказ от `input_required`.
 
 Не поддерживаются:
 
+- legacy-протокол с `initialize`-handshake (ревизии до 2026-07-28);
 - транспорт Streamable HTTP и SSE;
 - MCP resources как отдельная возможность клиента;
 - MCP prompts;
 - sampling;
 - roots;
-- elicitation;
+- elicitation и multi round-trip retry с `inputResponses`;
 - progress notifications;
 - tasks.
 
