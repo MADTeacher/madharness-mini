@@ -23,8 +23,9 @@
 4. `base_context()` добавляет встроенный prompt и корневой `AGENTS.md`.
 5. `ToolRegistry` получает встроенные tools, `activate_skill` и MCP tools из
    `.madharness-mini/mcp.json`, если файл есть.
-6. MCP provider запускает включённые stdio servers, вызывает `initialize` и
-   `tools/list`, затем создаёт `ToolSpec` для каждого внешнего tool.
+6. MCP provider запускает включённые stdio servers, проходит пробу
+   `server/discover` и `tools/list`, затем создаёт `ToolSpec` для каждого
+   внешнего tool.
 7. `ContextManager.messages()` применяет бюджет.
 8. `model_loop.py` отправляет messages и tool schemas модели.
 9. При MCP tool call provider отправляет `tools/call` внешнему серверу и

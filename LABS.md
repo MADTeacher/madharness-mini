@@ -55,7 +55,7 @@
 
 Где смотреть в спецификации:
 
-- [Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools),
+- [Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
   разделы `Listing Tools`, `Tool` и `Tool Names`.
 
 Ограничения:
@@ -93,8 +93,8 @@
 
 Где смотреть в спецификации:
 
-- [Pagination](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination);
-- [Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools),
+- [Pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination);
+- [Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
   раздел `Listing Tools`.
 
 Ограничения:
@@ -130,7 +130,7 @@
 
 Где смотреть в спецификации:
 
-- [Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools),
+- [Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools),
   разделы `Calling Tools` и `Tool Result`.
 
 Ограничения:
@@ -159,7 +159,7 @@
 
 Задание: сейчас харнесс использует MCP-сервер только как источник инструментов:
 `tools/list` и `tools/call`. Добавьте минимальную поддержку серверных
-возможностей `resources` и `prompts` из спецификации MCP. После `initialize`
+возможностей `resources` и `prompts` из спецификации MCP. После `server/discover`
 клиент должен проверять объявленные возможности сервера и, если они есть, уметь
 выполнить `resources/list`, `resources/read`, `resources/templates/list`,
 `prompts/list` и `prompts/get`.
@@ -177,11 +177,11 @@
 
 Где смотреть в спецификации:
 
-- [Server Features](https://modelcontextprotocol.io/specification/2025-11-25/server/index);
-- [Resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources);
-- [Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts);
-- [Pagination](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination);
-- [Lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle).
+- [Server Features](https://modelcontextprotocol.io/specification/2026-07-28/server/index);
+- [Resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources);
+- [Prompts](https://modelcontextprotocol.io/specification/2026-07-28/server/prompts);
+- [Pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination);
+- [Discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover).
 
 Ограничения:
 
@@ -216,14 +216,14 @@
 `max_turns` и при таймауте `tools/call`.
 
 Для зависшего сервера подготовьте тестовый процесс, который работает через
-стандартные потоки (`stdio`) и отвечает на `initialize`, но зависает на
+стандартные потоки (`stdio`) и отвечает на `server/discover`, но зависает на
 `tools/list` или `tools/call`. Харнесс должен вернуть понятную ошибку, закрыть
 процесс и не потерять исходную причину сбоя.
 
 Где смотреть в спецификации:
 
-- [Lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle),
-  разделы про инициализацию, рабочую фазу и завершение соединения.
+- [stdio](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio),
+  разделы `Shutdown` и `Unexpected Termination`.
 
 Ограничения:
 

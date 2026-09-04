@@ -12,12 +12,7 @@ from typing import Any
 
 from ..utils import clipped
 from .config import McpServerConfig
-from .protocol import (
-    MCP_PROTOCOL_VERSION,
-    JsonRpcBuilder,
-    method_not_found_response,
-    parse_response,
-)
+from .protocol import MCP_PROTOCOL_VERSION, JsonRpcBuilder, parse_response
 
 # Эти переменные обычно нужны локальным рантаймам вроде `npx`, но не раскрывают
 # ключ LLM API и другие MADHARNESS_MINI_* настройки.
@@ -37,7 +32,7 @@ SAFE_INHERITED_ENV = {
 
 
 class StdioMcpClient:
-    """Один запущенный MCP-сервер: initialize, tools/list и tools/call."""
+    """Один запущенный MCP-сервер: server/discover, tools/list и tools/call."""
 
     def __init__(self, config: McpServerConfig):
         self.config = config
@@ -49,7 +44,7 @@ class StdioMcpClient:
         self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> list[dict[str, Any]]:
-        """Запускаем сервер, проходим MCP lifecycle и возвращаем tools/list."""
+        """Запускаем сервер, проходим server/discover и возвращаем tools/list."""
 
         self.process = subprocess.Popen(
             [self.config.command, *self.config.args],
@@ -76,23 +71,29 @@ class StdioMcpClient:
         self._stdout_thread.start()
         self._stderr_thread.start()
 
-        init = self.request(
-            "initialize",
-            {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "madharness-mini",
-                    "version": "0.1.0",
-                },
-            },
-        )
-        version = init.get("protocolVersion")
-        if version != MCP_PROTOCOL_VERSION:
+        # Проба stateless MCP: современные серверы отвечают DiscoverResult,
+        # legacy-серверы до initialize отвечают ошибкой или молчат.
+        try:
+            discover = self.request("server/discover")
+        except RuntimeError as exc:
             raise RuntimeError(
-                f"unsupported MCP protocolVersion: {version}; expected {MCP_PROTOCOL_VERSION}"
+                f"MCP server {self.config.name} failed server/discover probe: {exc}; "
+                f"madharness-mini supports only stateless MCP {MCP_PROTOCOL_VERSION} "
+                "and cannot talk to servers that require the legacy initialize handshake"
+            ) from exc
+        versions = discover.get("supportedVersions")
+        if not isinstance(versions, list) or not all(
+            isinstance(version, str) for version in versions
+        ):
+            raise RuntimeError(
+                f"invalid MCP server/discover result from {self.config.name}: "
+                "supportedVersions must be list of strings"
             )
-        self.notify("notifications/initialized", {})
+        if MCP_PROTOCOL_VERSION not in versions:
+            raise RuntimeError(
+                f"MCP server {self.config.name} supports protocol versions {versions}; "
+                f"madharness-mini requires {MCP_PROTOCOL_VERSION}"
+            )
         listed = self.request("tools/list", {})
         tools = listed.get("tools", [])
         if not isinstance(tools, list):
@@ -122,12 +123,13 @@ class StdioMcpClient:
             if isinstance(incoming, Exception):
                 raise incoming
             if _is_server_request(incoming):
-                self._send(
-                    method_not_found_response(
-                        incoming.get("id"), str(incoming.get("method") or "")
-                    )
+                # Современный stateless MCP запрещает серверу отправлять
+                # requests в stdio; вместо них используются InputRequiredResult.
+                raise RuntimeError(
+                    f"invalid MCP message from {self.config.name}: "
+                    f"server sent request {incoming.get('method')!r}; "
+                    "stateless MCP servers must not send requests"
                 )
-                continue
             if "id" not in incoming:
                 continue
             if incoming.get("id") != expected_id:
@@ -135,11 +137,6 @@ class StdioMcpClient:
                     f"unexpected MCP response id: {incoming.get('id')}; expected {expected_id}"
                 )
             return parse_response(incoming, expected_id)
-
-    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        """Отправляем MCP notification без ожидания response."""
-
-        self._send(self.rpc.notification(method, params))
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Вызываем исходное имя MCP tool на сервере."""
@@ -271,6 +268,6 @@ def _server_env(explicit: dict[str, str]) -> dict[str, str]:
 
 
 def _is_server_request(message: dict[str, Any]) -> bool:
-    """Отличаем request сервера от response/notification в нашем V1 клиенте."""
+    """Детектор запрещённого в stateless MCP запроса сервера к клиенту."""
 
     return "id" in message and "method" in message and "result" not in message

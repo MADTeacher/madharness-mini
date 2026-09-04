@@ -81,7 +81,8 @@ uv tool update-shell
 Если файла нет, MCP выключен. Harness запускает только явно включённые серверы.
 Команда и аргументы передаются в `subprocess` списком, без shell-строки.
 
-После `initialize` harness вызывает `tools/list`. Например MCP tool
+Клиент говорит только на stateless-протоколе MCP 2026-07-28: после пробы
+`server/discover` harness вызывает `tools/list`. Например MCP tool
 `browser_navigate` сервера `playwright` станет tool name:
 
 ```text

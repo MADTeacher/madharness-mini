@@ -23,8 +23,8 @@ MCP-инструмент выглядит как обычный tool, а для 
 ```
 
 Если файла нет, MCP выключен. Harness запускает только серверы с
-`enabled=true`. Поддерживается stdio transport и tools API: `initialize`,
-`tools/list`, `tools/call`.
+`enabled=true`. Поддерживается stdio transport (stateless-протокол
+2026-07-28) и tools API: `server/discover`, `tools/list`, `tools/call`.
 
 MCP tool получает имя:
 

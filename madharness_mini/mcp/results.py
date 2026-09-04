@@ -14,6 +14,8 @@ def mcp_result_to_observation(
 ) -> dict[str, Any]:
     """Сообщаем модели результат MCP tool в привычном формате ok/fail."""
 
+    if result.get("resultType") == "input_required":
+        return _input_required_observation(exported_name, server_name, tool_name, result)
     lines: list[str] = []
     images: list[dict[str, Any]] = []
     resources: list[dict[str, Any]] = []
@@ -51,6 +53,34 @@ def mcp_result_to_observation(
     if result.get("isError") is True:
         return fail(exported_name, summary, **data)
     return ok(exported_name, summary, **data)
+
+
+def _input_required_observation(
+    exported_name: str,
+    server_name: str,
+    tool_name: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Отказываемся от MRTR-запроса доп. ввода: харнесс не задаёт вопросы пользователю.
+
+    Elicitation, sampling и roots не поддерживаются клиентом (и deprecated в
+    спецификации), поэтому вместо ретрая с inputResponses возвращаем явный fail.
+    """
+
+    requests = result.get("inputRequests")
+    requested: list[str] = []
+    if isinstance(requests, dict):
+        for key, item in requests.items():
+            method = item.get("method") if isinstance(item, dict) else None
+            requested.append(f"{key}: {method}")
+    summary = (
+        f"MCP tool {server_name}.{tool_name} requires additional client input "
+        "(elicitation/sampling/roots) that madharness-mini does not support"
+    )
+    data: dict[str, Any] = {}
+    if requested:
+        data["requested_inputs"] = requested
+    return fail(exported_name, summary, **data)
 
 
 def _media_metadata(item: dict[str, Any], kind: str) -> dict[str, Any]:
