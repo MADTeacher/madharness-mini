@@ -1,6 +1,7 @@
 """Инструмент запуска разрешённой shell-команды в workspace."""
 
 import shlex
+import shutil
 import subprocess
 from typing import Any
 
@@ -39,8 +40,15 @@ def run_shell(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
                 tool="run_shell",
                 **event,
             )
+    argv = shlex.split(command)
+    # CreateProcess на Windows подставляет только .exe и не читает PATHEXT,
+    # поэтому голое имя вроде flutter (flutter.bat) даёт WinError 2. Резолвим
+    # исполняемый файл сами; на POSIX поведение не меняется.
+    resolved = shutil.which(argv[0])
+    if resolved:
+        argv[0] = resolved
     proc = subprocess.run(
-        shlex.split(command),
+        argv,
         cwd=cwd,
         text=True,
         capture_output=True,
