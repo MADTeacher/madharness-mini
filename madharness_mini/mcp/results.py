@@ -12,22 +12,38 @@ def mcp_result_to_observation(
     tool_name: str,
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Сообщаем модели результат MCP tool в привычном формате ok/fail."""
+    """Сообщаем модели результат MCP-tools в привычном формате ok/fail."""
 
+    # Если сервер запросил дополнительный ввод, возвращаем fail
     if result.get("resultType") == "input_required":
-        return _input_required_observation(exported_name, server_name, tool_name, result)
+        return _input_required_observation(
+            exported_name,
+            server_name,
+            tool_name,
+            result,
+        )
+
+    # Инициализируем списки для текста, изображений, ресурсов и неизвестных типов
     lines: list[str] = []
     images: list[dict[str, Any]] = []
     resources: list[dict[str, Any]] = []
     unknown: list[str] = []
+
+    # Обрабатываем содержимое result
     for item in result.get("content") or []:
+        # Если содержимое не является словарем, добавляем в unknown
         if not isinstance(item, dict):
-            unknown.append(f"non-object content: {type(item).__name__}")
+            unknown.append(
+                f"non-object content: {type(item).__name__}",
+            )
             continue
+        # Получаем тип содержимого и обрабатываем его
         kind = item.get("type")
         if kind == "text":
             text = item.get("text", "")
-            lines.append(text if isinstance(text, str) else json.dumps(text))
+            lines.append(
+                text if isinstance(text, str) else json.dumps(text),
+            )
         elif kind in {"image", "audio"}:
             images.append(_media_metadata(item, kind))
         elif kind in {"resource", "resource_link"}:
@@ -35,10 +51,14 @@ def mcp_result_to_observation(
         else:
             unknown.append(f"unsupported MCP content type: {kind}")
 
+    # Формируем content и вложения для отправки модели
+    # Оставляем только непустые строки и обрезаем текстовый
+    # блок до MAX_OUTPUT = 20 000 символов
     content = clipped("\n".join(line for line in lines if line))
     data: dict[str, Any] = {}
     if content:
         data["content"] = content
+    # Если в result есть structuredContent, добавляем в data
     structured = result.get("structuredContent")
     if structured is not None:
         data["data"] = structured
@@ -49,7 +69,9 @@ def mcp_result_to_observation(
     if unknown:
         data["diagnostics"] = unknown
 
+    # Формируем summary для отправки модели
     summary = f"MCP tool {server_name}.{tool_name} completed"
+    # Если в result есть isError, возвращаем fail, иначе ok
     if result.get("isError") is True:
         return fail(exported_name, summary, **data)
     return ok(exported_name, summary, **data)
@@ -61,30 +83,36 @@ def _input_required_observation(
     tool_name: str,
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Отказываемся от MRTR-запроса доп. ввода: харнесс не задаёт вопросы пользователю.
-
-    Elicitation, sampling и roots не поддерживаются клиентом (и deprecated в
-    спецификации), поэтому вместо ретрая с inputResponses возвращаем явный fail.
+    """Отказываемся от MRTR-запроса доп. ввода так как харнесс
+    не поддерживает эллитацию.
     """
 
+    # Получаем inputRequests из result
     requests = result.get("inputRequests")
     requested: list[str] = []
+    # Если inputRequests является словарем, обрабатываем его
     if isinstance(requests, dict):
         for key, item in requests.items():
             method = item.get("method") if isinstance(item, dict) else None
             requested.append(f"{key}: {method}")
+    # Формируем summary для отправки модели
     summary = (
-        f"MCP tool {server_name}.{tool_name} requires additional client input "
-        "(elicitation/sampling/roots) that madharness-mini does not support"
+        f"MCP tool {server_name}.{tool_name} requires "
+        f"additional client input "
+        f"(elicitation) that madharness-mini does not support"
     )
     data: dict[str, Any] = {}
+    # Если в result есть requested_inputs, добавляем в data
+    # и возвращаем fail
     if requested:
         data["requested_inputs"] = requested
     return fail(exported_name, summary, **data)
 
 
 def _media_metadata(item: dict[str, Any], kind: str) -> dict[str, Any]:
-    """Оставляем метаданные media content, не отправляя base64 модели."""
+    """Оставляем метаданные media content, не отправляя base64 модели.
+    Он будет отправлен модели вместе с другими метаданными.
+    """
 
     raw_data = item.get("data")
     return {

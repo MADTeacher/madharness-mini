@@ -6,8 +6,7 @@ MCP_PROTOCOL_VERSION = "2026-07-28"
 
 CLIENT_INFO = {"name": "madharness-mini", "version": "0.1.0"}
 
-# Ядро спецификации определяет complete и input_required; расширения могут
-# добавлять свои значения, но харнесс не объявляет поддержку расширений.
+# Известные типы результатов, которые может возвращать сервер
 KNOWN_RESULT_TYPES = {"complete", "input_required"}
 
 
@@ -26,12 +25,17 @@ def request_meta() -> dict[str, Any]:
 
 
 class JsonRpcBuilder:
-    """Выдаёт монотонные id и собирает JSON-RPC сообщения для MCP."""
+    """Выдает id и собирает JSON-RPC сообщения для MCP."""
 
     def __init__(self):
+        # инициализируем счетчик id
         self._next_id = 1
 
-    def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Собираем request с обязательным `_meta`, на который сервер обязан ответить."""
 
         message: dict[str, Any] = {
@@ -46,15 +50,24 @@ class JsonRpcBuilder:
         return message
 
 
-def parse_response(message: dict[str, Any], expected_id: int) -> dict[str, Any]:
-    """Достаём result из JSON-RPC response или превращаем error в RuntimeError."""
+def parse_response(
+    message: dict[str, Any],
+    expected_id: int,
+) -> dict[str, Any]:
+    """Достаем result из JSON-RPC response или превращаем error в RuntimeError."""
 
+    # проверяем версию jsonrpc
     if message.get("jsonrpc") != "2.0":
         raise RuntimeError("invalid JSON-RPC response: missing jsonrpc=2.0")
+
+    # проверяем id сообщения
     if message.get("id") != expected_id:
         raise RuntimeError(
-            f"invalid JSON-RPC response id: expected {expected_id}, got {message.get('id')}"
+            f"invalid JSON-RPC response id: expected {expected_id}, "
+            f"got {message.get('id')}"
         )
+
+    # проверяем наличие error
     if "error" in message:
         error = message.get("error")
         if isinstance(error, dict):
@@ -62,14 +75,22 @@ def parse_response(message: dict[str, Any], expected_id: int) -> dict[str, Any]:
             text = error.get("message", "unknown error")
             raise RuntimeError(f"MCP JSON-RPC error {code}: {text}")
         raise RuntimeError(f"MCP JSON-RPC error: {error}")
+
+    # проверяем наличие result
     if "result" not in message:
         raise RuntimeError("invalid JSON-RPC response: missing result")
+
+    # получаем result и проверяем его тип
     result = message["result"]
     if not isinstance(result, dict):
-        raise RuntimeError("invalid JSON-RPC response: result must be object")
-    # Отсутствие resultType допускается только для серверов старых ревизий;
-    # клиент обязан трактовать его как complete.
+        raise RuntimeError(
+            "invalid JSON-RPC response: result must be object",
+        )
+    # Отсутствие resultType допускается только для серверов старых ревизий.
+    # Клиент обязан трактовать его как complete.
     result_type = result.get("resultType", "complete")
     if result_type not in KNOWN_RESULT_TYPES:
-        raise RuntimeError(f"invalid MCP result: unknown resultType: {result_type}")
+        raise RuntimeError(
+            f"invalid MCP result: unknown resultType: {result_type}",
+        )
     return result

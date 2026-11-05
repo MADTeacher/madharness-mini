@@ -29,8 +29,16 @@ class ToolRegistry:
     ):
         self.cfg = cfg
         self.policy = Policy(cfg)
-        self.context = ToolContext(cfg, self.policy, trace, skill_runtime)
-        self.providers = [BuiltinToolProvider(), *list(providers or [])]
+        self.context = ToolContext(
+            cfg,
+            self.policy,
+            trace,
+            skill_runtime,
+        )
+        self.providers = [
+            BuiltinToolProvider(),
+            *list(providers or []),
+        ]
         self.tools = {}
         try:
             for provider in self.providers:
@@ -38,7 +46,9 @@ class ToolRegistry:
                 # и регистрируем их в словаре self.tools
                 for tool in provider.specs(self.context):
                     if tool.name in self.tools:
-                        raise RuntimeError(f"duplicate tool name: {tool.name}")
+                        raise RuntimeError(
+                            f"duplicate tool name: {tool.name}",
+                        )
                     self.tools[tool.name] = tool
         except Exception:
             self.close()
@@ -61,9 +71,11 @@ class ToolRegistry:
             return fail(name, f"{type(exc).__name__}: {exc}")
 
     def close(self) -> None:
-        """Закрываем providers с lifecycle, например MCP subprocess."""
+        """Закрываем провайдеры, у которых есть что останавливать, 
+        например процессы MCP-серверов."""
 
         for provider in self.providers:
+            # Проверяем, есть ли метод close у текущего provider
             close = getattr(provider, "close", None)
             if close is None:
                 continue
